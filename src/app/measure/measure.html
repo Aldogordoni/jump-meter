@@ -66,29 +66,83 @@
       }
     </div>
 
-    <div class="fps">
-      <div class="field">
-        <label for="capFps">Recorded at (fps)</label>
-        <input
-          id="capFps"
-          type="number"
-          inputmode="decimal"
-          min="1"
-          step="any"
-          [ngModel]="realFps()"
-          (ngModelChange)="setCaptureFps($event)"
-          placeholder="e.g. 240"
-        />
-        <span class="hint">
-          The file plays at {{ fileFps() }} fps.
-          @if (isSlowedDown()) {
-            It's a slowed-down export, so each frame is 1/{{ realFps() }} s of real time.
-          } @else {
-            If you shot slow-mo and it was saved at normal speed (e.g. shot at 240, saved at 30), enter the real rate.
+    <div class="fps-panel" aria-live="polite">
+      <div class="fps-line">
+        <span class="lbl">Frame rate</span>
+        <strong class="num rate">{{ realFps() }} fps</strong>
+        <span class="src">
+          @switch (fpsSource()) {
+            @case ('file') { from the video file }
+            @case ('metadata') { slow-motion rate saved in the file }
+            @case ('motion') { worked out from your jump }
+            @case ('manual') { set by you }
           }
         </span>
+        @if (!editingFps()) {
+          <button class="btn ghost change" type="button" (click)="editingFps.set(true)">Change</button>
+        }
       </div>
+
+      @switch (fpsCheck().state) {
+        @case ('idle') {
+          <p class="check muted">Once take-off and landing are marked, the app double-checks this against your jump's motion.</p>
+        }
+        @case ('running') {
+          <p class="check muted">Checking the frame rate against your jump's motion…</p>
+        }
+        @case ('agrees') {
+          <p class="check ok">Your jump's motion matches {{ realFps() }} fps.</p>
+        }
+        @case ('corrected') {
+          @if (fpsCheck(); as c) {
+            @if (c.state === 'corrected') {
+              <p class="check fixed">
+                Your jump's motion matches <strong>{{ c.to }} fps</strong>: this is slow motion saved as a {{ c.from }} fps
+                video. Using {{ c.to }} fps.
+                <button class="btn ghost inline" type="button" (click)="useFps(c.from, 'file')">Use {{ c.from }} fps instead</button>
+              </p>
+            }
+          }
+        }
+        @case ('suggest') {
+          @if (fpsCheck(); as c) {
+            @if (c.state === 'suggest') {
+              <p class="check fixed">
+                Your jump's motion suggests <strong>{{ c.fps }} fps</strong>, not {{ realFps() }}.
+                <button class="btn ghost inline" type="button" (click)="useFps(c.fps)">Use {{ c.fps }} fps</button>
+              </p>
+            }
+          }
+        }
+        @case ('unavailable') {
+          <p class="check muted">Couldn't check this against your motion. Keep your whole body in shot for the check to work.</p>
+        }
+      }
+
+      @if (editingFps()) {
+        <div class="fps-edit">
+          <span class="small muted">Real frame rate the camera recorded at:</span>
+          <div class="rates">
+            @for (r of commonRates; track r) {
+              <button type="button" class="rate-btn" [class.on]="realFps() === r" (click)="setCaptureFps(r)">{{ r }}</button>
+            }
+            <input
+              id="capFps"
+              type="number"
+              inputmode="decimal"
+              min="1"
+              step="any"
+              [ngModel]="realFps()"
+              (change)="setCaptureFps($any($event.target).value)"
+              aria-label="Custom frame rate"
+            />
+            <button class="btn ghost" type="button" (click)="editingFps.set(false)">Done</button>
+          </div>
+          <span class="small muted">The file says {{ fileFps() }} fps. Only change this if you know the clip was recorded differently.</span>
+        </div>
+      }
     </div>
+
     @if (lowFps()) {
       <p class="warn">
         At {{ realFps() }} fps each frame is {{ 1000 / (realFps() || 1) | number: '1.0-0' }} ms, so expect roughly
@@ -262,8 +316,23 @@
             <label for="note">Note</label>
             <input id="note" type="text" [ngModel]="note()" (ngModelChange)="note.set($event)" placeholder="e.g. after warm-up, trainers" />
           </div>
+          @if (!savedId()) {
+            <label class="check-row">
+              <input type="checkbox" [ngModel]="saveClip()" (ngModelChange)="saveClip.set($event)" />
+              Save a video clip of the jump (stays on this phone)
+            </label>
+          }
           @if (savedId()) {
-            <p class="saved" role="status">Saved. <a routerLink="/history">See history</a></p>
+            <p class="saved" role="status">
+              @if (clipProgress() !== null) {
+                Saved. Making the video clip… {{ clipProgress() }}%
+              } @else {
+                Saved. <a routerLink="/history">See history</a>
+              }
+            </p>
+            @if (clipError()) {
+              <p class="warn">{{ clipError() }}</p>
+            }
           } @else {
             <button class="btn primary" type="button" (click)="save()" [disabled]="!!orderError()">Save {{ type() }}</button>
           }

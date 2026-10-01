@@ -1,4 +1,4 @@
-import { Component, ElementRef, HostListener, OnDestroy, computed, inject, signal, viewChild } from '@angular/core';
+import { Component, ElementRef, HostListener, OnDestroy, computed, effect, inject, signal, untracked, viewChild } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
@@ -21,8 +21,11 @@ import { readVideoInfo, VideoInfo } from '../core/mp4-info';
 import { StoreService } from '../core/store.service';
 import { FrameSource, openFrameSource } from '../core/frame-source';
 import { DetectProgress, DetectResult, PoseDetectorService } from '../core/pose-detector.service';
-import { DetectionError } from '../core/flight-detect';
-import { HeightPipe } from '../core/height.pipe';
+import { DetectionError, FootSample } from '../core/flight-detect';
+import { estimateFps, reconcileFps } from '../core/fps-infer';
+import { HeightPipe, formatNumber } from '../core/height.pipe';
+import { makeClip } from '../core/clip-maker';
+import { clipStore, requestPersistentStorage } from '../core/clip-store';
 import { VaneGauge } from '../shared/vane-gauge';
 import { FootTrace } from '../shared/foot-trace';
 
@@ -78,6 +81,18 @@ export class Measure implements OnDestroy {
   protected readonly fileFps = signal<number | null>(null);
   /** Real-world capture rate, entered or read from metadata. Null = same as file. */
   protected readonly captureFps = signal<number | null>(null);
+  /** Where the frame rate in use came from. */
+  protected readonly fpsSource = signal<'file' | 'metadata' | 'motion' | 'manual'>('file');
+  protected readonly editingFps = signal(false);
+  protected readonly fpsCheck = signal<
+    | { state: 'idle' | 'running' | 'unavailable' }
+    | { state: 'agrees'; fps: number }
+    | { state: 'corrected'; from: number; to: number }
+    | { state: 'suggest'; fps: number }
+  >({ state: 'idle' });
+  protected readonly commonRates = [30, 60, 120, 240];
+  private lastCheckKey = '';
+  private checkAbort?: AbortController;
   protected readonly currentFrame = signal(0);
   protected readonly shownFrame = signal<number | null>(null);
   protected readonly playing = signal(false);
@@ -104,6 +119,9 @@ export class Measure implements OnDestroy {
   // Save
   protected readonly note = signal('');
   protected readonly savedId = signal<string | null>(null);
+  protected readonly saveClip = signal(true);
+  protected readonly clipProgress = signal<number | null>(null);
+  protected readonly clipError = signal<string | null>(null);
 
   protected readonly units = computed(() => this.store.settings().units);
   protected readonly boxInUnits = computed(() => {
@@ -188,6 +206,15 @@ export class Measure implements OnDestroy {
 
   constructor() {
     this.pose.preload();
+    // Re-check the frame rate against the jump's motion whenever take-off/landing change.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    effect(() => {
+      const m = this.marks();
+      const loaded = this.loaded();
+      clearTimeout(timer);
+      if (!loaded || m.air === null || m.ground === null || m.ground - m.air < 4) return;
+      timer = setTimeout(() => untracked(() => this.checkFps()), 700);
+    });
   }
 
   ngOnDestroy() {
@@ -216,7 +243,10 @@ export class Measure implements OnDestroy {
       this.totalFrames.set(source.frameCount);
       const fileFps = info.containerFps ?? source.fps;
       this.fileFps.set(Math.round(fileFps * 100) / 100);
-      if (info.captureFps && info.captureFps > fileFps * 1.05) this.captureFps.set(info.captureFps);
+      if (info.captureFps && info.captureFps > fileFps * 1.05) {
+        this.captureFps.set(info.captureFps);
+        this.fpsSource.set('metadata');
+      }
       this.loaded.set(true);
       // Let the canvas render before drawing into it.
       setTimeout(() => this.goTo(0));
@@ -243,6 +273,11 @@ export class Measure implements OnDestroy {
     this.totalFrames.set(0);
     this.fileFps.set(null);
     this.captureFps.set(null);
+    this.fpsSource.set('file');
+    this.editingFps.set(false);
+    this.checkAbort?.abort();
+    this.fpsCheck.set({ state: 'idle' });
+    this.lastCheckKey = '';
     this.currentFrame.set(0);
     this.shownFrame.set(null);
     this.clearMarks();
@@ -372,8 +407,93 @@ export class Measure implements OnDestroy {
 
   setCaptureFps(v: number | null) {
     const n = Number(v);
-    this.captureFps.set(n > 0 ? n : null);
+    if (!(n > 0)) return;
+    this.captureFps.set(n);
+    this.fpsSource.set('manual');
     this.savedId.set(null);
+    // Let the motion check re-evaluate against the new choice.
+    this.lastCheckKey = '';
+    this.checkFps();
+  }
+
+  /** Accept the frame rate the motion check suggests. */
+  useFps(fps: number, source: 'motion' | 'file' = 'motion') {
+    this.captureFps.set(fps);
+    this.fpsSource.set(source);
+    this.savedId.set(null);
+    this.fpsCheck.set({ state: 'agrees', fps });
+  }
+
+  /** The frame rate the file itself states (slow-mo metadata first). */
+  private fileStatedFps(): number | null {
+    const info = this.info();
+    const f = this.fileFps();
+    return info?.captureFps && f && info.captureFps > f * 1.05 ? info.captureFps : f;
+  }
+
+  /**
+   * Check the frame rate against physics: fit the hips' parabola in the air.
+   * Silently fixes slow-motion clips saved at normal speed, unless the user chose a rate.
+   */
+  async checkFps() {
+    const m = this.marks();
+    const base = this.fileStatedFps();
+    if (!this.source || m.air === null || m.ground === null || !base) return;
+    const key = `${m.air}-${m.ground}-${this.fpsSource() === 'manual' ? this.realFps() : ''}`;
+    if (key === this.lastCheckKey) return;
+    this.lastCheckKey = key;
+    this.checkAbort?.abort();
+    const abort = (this.checkAbort = new AbortController());
+    this.fpsCheck.set({ state: 'running' });
+
+    const total = this.totalFrames();
+    const F = m.ground - m.air;
+    const pick = (a: number, b: number, n: number) => {
+      const out: number[] = [];
+      if (b < a) return out;
+      const step = Math.max(1, (b - a) / Math.max(1, n - 1));
+      for (let x = a; x <= b + 1e-9 && out.length < n; x += step) out.push(Math.round(x));
+      return [...new Set(out)];
+    };
+    const flightFrames = pick(m.air + 1, m.ground - 1, 16);
+    // Standing frames: well before the dip, else well after landing.
+    let standFrames = pick(0, m.air - Math.ceil(1.5 * F) - 1, 6);
+    if (standFrames.length < 3) standFrames = pick(m.ground + Math.ceil(1.5 * F), total - 1, 6);
+
+    try {
+      const known = new Map<number, FootSample>((this.detection()?.trace ?? []).map((t) => [t.frame, t]));
+      const need = [...flightFrames, ...standFrames].filter((f) => !known.has(f));
+      if (need.length) {
+        for (const smp of await this.pose.samplePoses(this.source, need, abort.signal)) known.set(smp.frame, smp);
+      }
+      if (abort.signal.aborted) return;
+      const inFlight = [...known.values()].filter((p) => p.frame > m.air! && p.frame < m.ground!);
+      const standing = standFrames.map((f) => known.get(f)).filter((p): p is FootSample => !!p);
+      const stature = (this.store.settings().statureCm ?? 175) / 100;
+      const est = estimateFps(inFlight, standing, stature);
+      const r = est ? reconcileFps(base, est) : null;
+      console.info('[jump-meter] fps check', { base, est, r });
+      if (!r) {
+        this.fpsCheck.set({ state: 'unavailable' });
+        return;
+      }
+      const current = this.realFps()!;
+      if (Math.abs(Math.log(r.fps / current)) < Math.log(1.1)) {
+        this.fpsCheck.set({ state: 'agrees', fps: current });
+      } else if (this.fpsSource() === 'manual') {
+        this.fpsCheck.set({ state: 'suggest', fps: r.fps });
+      } else {
+        this.captureFps.set(r.fps);
+        this.fpsSource.set(r.agrees ? 'file' : 'motion');
+        this.savedId.set(null);
+        this.fpsCheck.set(r.agrees ? { state: 'agrees', fps: r.fps } : { state: 'corrected', from: current, to: r.fps });
+      }
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        console.warn(e);
+        this.fpsCheck.set({ state: 'unavailable' });
+      }
+    }
   }
 
   setBox(v: number | null) {
@@ -452,6 +572,45 @@ export class Measure implements OnDestroy {
       rsiMod: round(r.rsiMod, 2),
     });
     this.savedId.set(rec.id);
+    requestPersistentStorage();
+    if (this.saveClip()) this.storeClip(rec.id, r.heightCm, r.rsi, r.rsiMod);
+  }
+
+  private async storeClip(id: string, heightCm: number, rsiValue: number | null, rsiModValue: number | null) {
+    const fps = this.realFps();
+    if (!this.source || !fps) return;
+    const m = this.marks();
+    const labels: Record<MarkKey, string> = {
+      start: 'Movement start',
+      contact: 'Box landing',
+      air: 'Take-off',
+      ground: 'Landing',
+    };
+    const marks = this.markDefs()
+      .filter((d) => m[d.key] !== null)
+      .map((d) => ({ frame: m[d.key]!, label: labels[d.key] }));
+    const u = this.units();
+    const value = formatNumber(toUnits(heightCm, u), 1);
+    const extra = rsiValue !== null ? `RSI ${rsiValue.toFixed(2)}, ` : rsiModValue !== null ? `RSI-mod ${rsiModValue.toFixed(2)}, ` : '';
+    const date = new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+    this.clipError.set(null);
+    this.clipProgress.set(0);
+    try {
+      const clip = await makeClip({
+        source: this.source,
+        realFps: fps,
+        marks,
+        caption: `${value} ${u} ${this.type()}`,
+        subcaption: `${extra}${date}`,
+        onProgress: (f) => this.clipProgress.set(Math.round(f * 100)),
+      });
+      await clipStore.put({ id, ...clip, createdAt: new Date().toISOString() });
+    } catch (e) {
+      console.error(e);
+      this.clipError.set("The jump is saved, but the video clip couldn't be made on this browser.");
+    } finally {
+      this.clipProgress.set(null);
+    }
   }
 
   protected progressPct() {

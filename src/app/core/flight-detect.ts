@@ -13,6 +13,9 @@ export interface FootSample {
   legLen: number;
   /** Mid-hip height, used to find the start of the countermovement. */
   hipY?: number;
+  /** Nose and lowest heel, used for body size (frame-rate check). */
+  noseY?: number;
+  heelY?: number;
 }
 
 export type DetectMode = 'single' | 'drop';

@@ -1,10 +1,11 @@
-import { Component, computed, inject, signal } from '@angular/core';
+import { Component, OnDestroy, computed, effect, inject, signal } from '@angular/core';
 import { DatePipe, DecimalPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { StoreService } from '../core/store.service';
 import { JUMP_TYPES, JumpRecord, JumpType, toUnits } from '../core/jump-math';
 import { HeightPipe, formatNumber } from '../core/height.pipe';
 import { ChartPoint, ProgressChart } from '../shared/progress-chart';
+import { clipStore, StoredClip } from '../core/clip-store';
 
 type MetricKey = 'height' | 'rsi' | 'contact' | 'rsiMod' | 'ttt';
 
@@ -115,6 +116,14 @@ interface Metric {
               @if (r.note) {
                 <span class="note">{{ r.note }}</span>
               }
+              @if (clipIds().has(r.id)) {
+                <button class="thumb" type="button" (click)="openClip(r)">
+                  @if (posters()[r.id]; as src) {
+                    <img [src]="src" alt="" />
+                  }
+                  <span>Watch clip</span>
+                </button>
+              }
             </div>
             <button class="btn ghost del" type="button" (click)="remove(r)" [attr.aria-label]="'Delete jump of ' + (r.heightCm | height)">
               Delete
@@ -122,6 +131,21 @@ interface Metric {
           </li>
         }
       </ul>
+    }
+
+    @if (viewing(); as v) {
+      <div class="viewer" role="dialog" aria-modal="true" aria-label="Jump clip" (click)="closeClip()">
+        <div class="viewer-box" (click)="$event.stopPropagation()">
+          <video [src]="v.url" controls autoplay loop muted playsinline></video>
+          <div class="viewer-actions">
+            @if (canShare()) {
+              <button class="btn primary" type="button" (click)="shareClip()">Share or save</button>
+            }
+            <a class="btn" [href]="v.url" [download]="v.fileName">Download</a>
+            <button class="btn ghost" type="button" (click)="closeClip()">Close</button>
+          </div>
+        </div>
+      </div>
     }
 
     @if (undo(); as u) {
@@ -251,6 +275,58 @@ interface Metric {
         padding-inline: 0.6em;
       }
     }
+    .thumb {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: var(--blue);
+      font-weight: 600;
+      cursor: pointer;
+      text-align: left;
+      img {
+        width: 64px;
+        height: 40px;
+        object-fit: cover;
+        border-radius: var(--r-sm);
+        background: #000;
+      }
+    }
+    .viewer {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      background: rgba(10, 14, 24, 0.85);
+      display: grid;
+      place-items: center;
+      padding: 16px;
+    }
+    .viewer-box {
+      width: min(100%, 720px);
+      display: grid;
+      gap: 10px;
+      video {
+        width: 100%;
+        max-height: 70vh;
+        background: #000;
+        border-radius: var(--r-lg);
+      }
+    }
+    .viewer-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      .btn {
+        color: #fff;
+        border-color: #fff;
+      }
+      .btn.primary {
+        border-color: var(--blue);
+      }
+    }
     .toast {
       position: fixed;
       left: 16px;
@@ -272,8 +348,71 @@ interface Metric {
     }
   `,
 })
-export class History {
+export class History implements OnDestroy {
   protected readonly store = inject(StoreService);
+  protected readonly clipIds = signal<Set<string>>(new Set());
+  protected readonly posters = signal<Record<string, string>>({});
+  protected readonly viewing = signal<{ url: string; fileName: string; clip: StoredClip } | null>(null);
+  protected readonly canShare = signal(typeof navigator !== 'undefined' && !!navigator.canShare);
+  private readonly pendingClipDeletes = new Set<string>();
+
+  constructor() {
+    this.refreshClips();
+    // Load poster thumbnails for the jumps on screen.
+    effect(() => {
+      const ids = this.clipIds();
+      const have = this.posters();
+      for (const r of this.filtered()) {
+        if (!ids.has(r.id) || have[r.id]) continue;
+        clipStore.get(r.id).then((c) => {
+          if (c) this.posters.update((p) => ({ ...p, [r.id]: URL.createObjectURL(c.poster) }));
+        });
+      }
+    });
+  }
+
+  ngOnDestroy() {
+    Object.values(this.posters()).forEach((u) => URL.revokeObjectURL(u));
+    this.closeClip();
+    this.flushClipDeletes();
+  }
+
+  private refreshClips() {
+    clipStore
+      .ids()
+      .then((ids) => this.clipIds.set(ids))
+      .catch(() => undefined);
+  }
+
+  protected async openClip(r: JumpRecord) {
+    const clip = await clipStore.get(r.id);
+    if (!clip) return;
+    const ext = clip.mime.includes('mp4') ? 'mp4' : 'webm';
+    const name = `jump-${r.date.slice(0, 10)}-${r.type.replace(/\W+/g, '-').toLowerCase()}-${r.heightCm}cm.${ext}`;
+    this.viewing.set({ url: URL.createObjectURL(clip.video), fileName: name, clip });
+  }
+
+  protected closeClip() {
+    const v = this.viewing();
+    if (v) URL.revokeObjectURL(v.url);
+    this.viewing.set(null);
+  }
+
+  protected async shareClip() {
+    const v = this.viewing();
+    if (!v) return;
+    const file = new File([v.clip.video], v.fileName, { type: v.clip.mime });
+    try {
+      if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: 'My jump' });
+    } catch {
+      /* user cancelled */
+    }
+  }
+
+  private flushClipDeletes() {
+    for (const id of this.pendingClipDeletes) clipStore.delete(id).catch(() => undefined);
+    this.pendingClipDeletes.clear();
+  }
   protected readonly undo = signal<JumpRecord | null>(null);
   private undoTimer?: ReturnType<typeof setTimeout>;
   protected readonly units = computed(() => this.store.settings().units);
@@ -351,15 +490,23 @@ export class History {
   }
 
   protected remove(r: JumpRecord) {
+    this.flushClipDeletes();
     this.store.remove(r.id);
+    this.pendingClipDeletes.add(r.id);
     this.undo.set(r);
     clearTimeout(this.undoTimer);
-    this.undoTimer = setTimeout(() => this.undo.set(null), 6000);
+    this.undoTimer = setTimeout(() => {
+      this.undo.set(null);
+      this.flushClipDeletes();
+    }, 6000);
   }
 
   protected restore() {
     const r = this.undo();
-    if (r) this.store.restore(r);
+    if (r) {
+      this.store.restore(r);
+      this.pendingClipDeletes.delete(r.id);
+    }
     this.undo.set(null);
   }
 }

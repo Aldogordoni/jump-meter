@@ -7,12 +7,14 @@ export interface Settings {
   units: Units;
   /** Last box height used for drop jumps, in cm. */
   boxCm: number | null;
+  /** Standing height, used to check the frame rate from the jump's motion. */
+  statureCm: number | null;
 }
 
 const HISTORY_KEY = 'jump-meter.history.v1';
 const SETTINGS_KEY = 'jump-meter.settings.v1';
 
-const DEFAULT_SETTINGS: Settings = { massKg: null, defaultType: 'CMJ', units: 'cm', boxCm: null };
+const DEFAULT_SETTINGS: Settings = { massKg: null, defaultType: 'CMJ', units: 'cm', boxCm: null, statureCm: null };
 
 function load<T>(key: string, fallback: T): T {
   try {

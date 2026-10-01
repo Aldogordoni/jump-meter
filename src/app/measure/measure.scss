@@ -345,3 +345,96 @@
     grid-template-columns: 1fr;
   }
 }
+
+.fps-panel {
+  margin: 14px 0 6px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border-radius: var(--r-lg);
+  .fps-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 8px;
+  }
+  .lbl {
+    font-size: 0.85rem;
+    color: var(--ink-soft);
+    font-weight: 600;
+  }
+  .rate {
+    font-size: 1.3rem;
+  }
+  .src {
+    font-size: 0.85rem;
+    color: var(--ink-soft);
+  }
+  .change {
+    margin-left: auto;
+    min-height: 36px;
+  }
+  .check {
+    margin: 6px 0 0;
+    font-size: 0.9rem;
+    &.ok {
+      color: var(--ok);
+      font-weight: 600;
+    }
+    &.fixed {
+      border-left: 4px solid var(--blue);
+      padding-left: 8px;
+    }
+  }
+  .inline {
+    min-height: 32px;
+    padding: 0 0.4em;
+    color: var(--blue);
+    text-decoration: underline;
+  }
+  .fps-edit {
+    display: grid;
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .rates {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    input {
+      width: 5.5em;
+      min-height: 40px;
+      padding: 0 0.5em;
+      border: 1.5px solid var(--line);
+      border-radius: var(--r-sm);
+      background: var(--paper);
+    }
+  }
+  .rate-btn {
+    min-width: 52px;
+    min-height: 40px;
+    border: 1.5px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--paper);
+    font-weight: 700;
+    cursor: pointer;
+    &.on {
+      background: var(--ink);
+      color: var(--paper);
+      border-color: var(--ink);
+    }
+  }
+}
+
+.check-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 0.92rem;
+  min-height: 44px;
+  cursor: pointer;
+  input {
+    width: 20px;
+    height: 20px;
+    accent-color: var(--blue);
+  }
+}

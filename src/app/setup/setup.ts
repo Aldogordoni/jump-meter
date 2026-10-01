@@ -1,7 +1,8 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { StoreService } from '../core/store.service';
-import { JUMP_TYPES } from '../core/jump-math';
+import { JUMP_TYPES, fromUnits, toUnits } from '../core/jump-math';
+import { requestPersistentStorage } from '../core/clip-store';
 
 @Component({
   selector: 'app-setup',
@@ -71,6 +72,18 @@ import { JUMP_TYPES } from '../core/jump-math';
           <span class="hint">Used to estimate peak power (Sayers equation).</span>
         </div>
         <div class="field">
+          <label for="stature">Your height ({{ store.settings().units }})</label>
+          <input
+            id="stature"
+            type="number"
+            inputmode="decimal"
+            [ngModel]="statureInUnits()"
+            (ngModelChange)="setStature($event)"
+            placeholder="Optional"
+          />
+          <span class="hint">Makes the frame-rate check more precise.</span>
+        </div>
+        <div class="field">
           <label for="dtype">Default jump type</label>
           <select id="dtype" [ngModel]="store.settings().defaultType" (ngModelChange)="store.updateSettings({ defaultType: $event })">
             @for (t of types; track t) {
@@ -112,9 +125,21 @@ import { JUMP_TYPES } from '../core/jump-math';
     <section>
       <h2>Your data</h2>
       <p>
-        Jumps are saved on this device only, in this browser. Export a backup to keep them safe or move them to another
-        phone.
+        Everything stays on this phone, in this browser: your jumps, your details and the video clips. Nothing is uploaded,
+        there's no account, and the app has no server to send anything to. Videos you open are read locally and never
+        leave the device.
       </p>
+      <p>
+        The flip side: if you clear this browser's data or uninstall the app, your history goes with it. Export a backup
+        now and then (video clips aren't included, download the ones you want to keep from History).
+        @if (persisted() === false) {
+          <strong>On iPhone, add the app to your home screen.</strong> Safari can otherwise delete data for sites you
+          haven't opened in 7 days.
+        }
+      </p>
+      @if (usage(); as u) {
+        <p class="small muted">Using {{ u }} of storage on this device.</p>
+      }
       <div class="row">
         <button class="btn" type="button" (click)="export()" [disabled]="!store.history().length">Export backup</button>
         <label class="btn">
@@ -177,6 +202,9 @@ import { JUMP_TYPES } from '../core/jump-math';
       gap: 8px;
       flex-wrap: wrap;
     }
+    .small {
+      font-size: 0.85rem;
+    }
     .msg {
       margin-top: 10px;
       font-weight: 600;
@@ -192,6 +220,27 @@ export class Setup {
   protected readonly store = inject(StoreService);
   protected readonly types = JUMP_TYPES;
   protected readonly message = signal('');
+  protected readonly persisted = signal<boolean | null>(null);
+  protected readonly usage = signal<string | null>(null);
+
+  protected readonly statureInUnits = computed(() => {
+    const cm = this.store.settings().statureCm;
+    return cm === null ? null : Math.round(toUnits(cm, this.store.settings().units) * 10) / 10;
+  });
+
+  constructor() {
+    requestPersistentStorage().then((p) => this.persisted.set(p));
+    navigator.storage
+      ?.estimate?.()
+      .then((e) => e.usage !== undefined && this.usage.set(`${(e.usage / 1024 / 1024).toFixed(1)} MB`))
+      .catch(() => undefined);
+  }
+
+  protected setStature(v: number | null) {
+    const n = Number(v);
+    const cm = n > 0 ? fromUnits(n, this.store.settings().units) : null;
+    this.store.updateSettings({ statureCm: cm && cm > 100 && cm < 250 ? Math.round(cm) : null });
+  }
 
   protected export() {
     const blob = new Blob([this.store.exportJson()], { type: 'application/json' });

@@ -194,7 +194,9 @@ function findCaptureFps(view: DataView, moov: Box): number | null {
         names.push(name);
         p += size;
       }
-      const idx = names.findIndex((n) => n.includes('capture.fps'));
+      const idx = names.findIndex(
+        (n) => n.includes('capture.fps') || ((n.includes('framerate') || n.includes('frame-rate')) && !n.includes('intent')),
+      );
       if (idx < 0) continue;
 
       for (const item of children(view, ilst.start, ilst.end)) {

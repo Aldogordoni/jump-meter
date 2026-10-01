@@ -146,7 +146,7 @@ export class PoseDetectorService {
         const footY = Math.max(...FOOT_POINTS.map((i) => lm[i].y));
         const hipY = (lm[L_HIP].y + lm[R_HIP].y) / 2;
         const ankleY = (lm[L_ANKLE].y + lm[R_ANKLE].y) / 2;
-        s = { frame, footY, legLen: ankleY - hipY, hipY };
+        s = { frame, footY, legLen: ankleY - hipY, hipY, noseY: lm[0].y, heelY: Math.max(lm[29].y, lm[30].y) };
       }
       cache.set(frame, s);
     };
@@ -207,6 +207,31 @@ export class PoseDetectorService {
     const trace = [...cache.values()].filter((s) => isFinite(s.footY)).sort((a, b) => a.frame - b.frame);
     return { ...estimate, trace };
   }
+
+  /** Run the pose model on specific frames (used for the frame-rate check after manual marking). */
+  async samplePoses(source: FrameSource, frames: number[], signal?: AbortSignal): Promise<FootSample[]> {
+    const { model } = await this.loadAny();
+    const out: FootSample[] = [];
+    await source.scan(
+      frames,
+      POSE_MAX_SIDE,
+      async (i, img) => {
+        out.push(toSample(i, model.detect(img).landmarks[0]));
+        await yieldToUi(out.length);
+      },
+      signal,
+    );
+    return out.sort((a, b) => a.frame - b.frame);
+  }
+}
+
+/** Turn MediaPipe landmarks into the measurements we use. */
+export function toSample(frame: number, lm: { x: number; y: number }[] | undefined): FootSample {
+  if (!lm) return { frame, footY: NaN, legLen: NaN };
+  const footY = Math.max(...FOOT_POINTS.map((i) => lm[i].y));
+  const hipY = (lm[L_HIP].y + lm[R_HIP].y) / 2;
+  const ankleY = (lm[L_ANKLE].y + lm[R_ANKLE].y) / 2;
+  return { frame, footY, legLen: ankleY - hipY, hipY, noseY: lm[0].y, heelY: Math.max(lm[29].y, lm[30].y) };
 }
 
 /** Let the progress bar repaint every few frames. */

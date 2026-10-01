@@ -22,6 +22,19 @@ It counts the frames between them and divides by the real capture rate to get *t
 
 Accuracy depends on frame rate: about ±0.5 cm at 240 fps, ±1 cm at 120 fps, ±5 cm at 30 fps.
 
+### Frame rate: file first, then physics
+
+The frame rate matters a lot: height goes with the *square* of the flight time, so reading the same frames at the wrong
+rate is way off (2× the fps = ¼ of the height).
+
+1. **From the file.** The MP4/MOV sample table gives the rate the video plays at, and Android slow-mo clips also store the
+   real capture rate (`com.android.capture.fps`).
+2. **From the jump itself.** In the air your hips follow a parabola under gravity. Its curvature in image units per frame²
+   is `½·g / (S·fps²)`, where `S` (metres per image unit) comes from your body size in the frame and your height (entered
+   in Setup, or 175 cm by default). That pins the real rate to within a few percent. It isn't precise enough to replace the
+   file's rate, but it easily catches slow motion saved as a normal-speed video (×2, ×4, ×8), which the app then fixes
+   automatically, with an undo (`src/app/core/fps-infer.ts`).
+
 ### Slow-mo files
 
 Phones save slow motion in two ways:
@@ -48,7 +61,15 @@ Heights display in **cm or inches** (Setup, or the toggle on the result). They'r
 - Auto-detection with MediaPipe Pose (`src/app/core/pose-detector.service.ts`, `flight-detect.ts`)
 - Flight time, take-off velocity, timing uncertainty and peak power (Sayers equation, if you add your body mass)
 - History per jump type, with a progress chart and JSON export/import (stored in `localStorage`)
-- Installable PWA that works offline after first use. Videos never leave the device.
+- Saves a short slow-motion **video clip** of each jump (key frames labelled, result captioned) to view, download or share
+- Installable PWA that works offline after first use
+
+## Privacy
+
+There is no account and no backend. Jump history and settings live in `localStorage`, and clips in IndexedDB, all on the
+device. Videos are decoded locally and never uploaded. A Content Security Policy only allows code from the app's
+own origin, and only allows network requests to that origin plus Google's model server, as a fallback for the pose model.
+The app asks for persistent storage so the browser doesn't evict data. Export a JSON backup from Setup.
 
 ## Development
 
