@@ -12,15 +12,11 @@ import {
 } from '../core/jump-math';
 import { readVideoInfo, VideoInfo } from '../core/mp4-info';
 import { StoreService } from '../core/store.service';
-import { seekToFrame, timeToFrame } from '../core/video-frames';
+import { FrameSource, openFrameSource } from '../core/frame-source';
 import { DetectProgress, DetectResult, PoseDetectorService } from '../core/pose-detector.service';
 import { DetectionError } from '../core/flight-detect';
 import { VaneGauge } from '../shared/vane-gauge';
 import { FootTrace } from '../shared/foot-trace';
-
-type FrameCallbackVideo = HTMLVideoElement & {
-  requestVideoFrameCallback?: (cb: (now: number, meta: { mediaTime: number }) => void) => number;
-};
 
 @Component({
   selector: 'app-measure',
@@ -32,18 +28,23 @@ export class Measure implements OnDestroy {
   private readonly store = inject(StoreService);
   private readonly pose = inject(PoseDetectorService);
 
-  protected readonly videoRef = viewChild<ElementRef<HTMLVideoElement>>('video');
+  protected readonly canvasRef = viewChild<ElementRef<HTMLCanvasElement>>('frame');
   protected readonly jumpTypes = JUMP_TYPES;
 
   // Video
-  protected readonly src = signal<string | null>(null);
+  protected readonly loaded = signal(false);
+  protected readonly loading = signal(false);
   protected readonly fileName = signal('');
   protected readonly info = signal<VideoInfo | null>(null);
   protected readonly loadError = signal<string | null>(null);
-  protected readonly duration = signal(0);
+  protected readonly engine = signal<'webcodecs' | 'video' | null>(null);
+  protected readonly totalFrames = signal(0);
+  /** Frame rate the file plays back at. */
   protected readonly fileFps = signal<number | null>(null);
+  /** Real-world capture rate, entered or read from metadata. Null = same as file. */
   protected readonly captureFps = signal<number | null>(null);
   protected readonly currentFrame = signal(0);
+  protected readonly shownFrame = signal<number | null>(null);
   protected readonly playing = signal(false);
 
   // Marks
@@ -58,19 +59,13 @@ export class Measure implements OnDestroy {
   protected readonly progress = signal<DetectProgress | null>(null);
   protected readonly detectError = signal<string | null>(null);
   protected readonly detection = signal<DetectResult | null>(null);
+  protected readonly elapsed = signal(0);
   private abort?: AbortController;
 
   // Save
   protected readonly type = signal<JumpType>(this.store.settings().defaultType);
   protected readonly note = signal('');
   protected readonly savedId = signal<string | null>(null);
-
-  protected readonly totalFrames = computed(() => {
-    const fps = this.fileFps();
-    const fc = this.info()?.frameCount;
-    if (fc) return fc;
-    return fps && this.duration() ? Math.floor(this.duration() * fps) : 0;
-  });
 
   protected readonly realFps = computed(() => this.captureFps() ?? this.fileFps());
   protected readonly isSlowedDown = computed(() => {
@@ -107,17 +102,19 @@ export class Measure implements OnDestroy {
 
   protected readonly best = computed(() => this.store.bestFor(this.type()));
 
-  private objectUrl: string | null = null;
-  private seekChain: Promise<void> = Promise.resolve();
-  private targetFrame = 0;
+  private source: FrameSource | null = null;
+  private playTimer?: ReturnType<typeof setTimeout>;
+  private elapsedTimer?: ReturnType<typeof setInterval>;
 
   constructor() {
     this.pose.preload();
   }
 
   ngOnDestroy() {
+    this.stopPlay();
     this.abort?.abort();
-    if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
+    clearInterval(this.elapsedTimer);
+    this.source?.dispose();
   }
 
   // ---------- Loading ----------
@@ -129,39 +126,45 @@ export class Measure implements OnDestroy {
     if (!file) return;
     this.reset();
     this.fileName.set(file.name);
-    const info = await readVideoInfo(file);
-    this.info.set(info);
-    this.fileFps.set(info.containerFps ? Math.round(info.containerFps * 100) / 100 : null);
-    this.captureFps.set(info.captureFps && info.containerFps && info.captureFps > info.containerFps * 1.05 ? info.captureFps : null);
-    this.objectUrl = URL.createObjectURL(file);
-    this.src.set(this.objectUrl);
-  }
-
-  onLoadedMetadata() {
-    const v = this.videoRef()?.nativeElement;
-    if (!v) return;
-    this.duration.set(v.duration);
-    this.goTo(0);
-  }
-
-  onVideoError() {
-    this.loadError.set(
-      "This browser can't play that video. iPhone HEVC clips may need 'Most Compatible' (Settings › Camera › Formats), or try Safari/Chrome.",
-    );
+    this.loading.set(true);
+    try {
+      const info = await readVideoInfo(file);
+      this.info.set(info);
+      const source = await openFrameSource(file, info.containerFps);
+      this.source = source;
+      this.engine.set(source.kind);
+      this.totalFrames.set(source.frameCount);
+      const fileFps = info.containerFps ?? source.fps;
+      this.fileFps.set(Math.round(fileFps * 100) / 100);
+      if (info.captureFps && info.captureFps > fileFps * 1.05) this.captureFps.set(info.captureFps);
+      this.loaded.set(true);
+      // Let the canvas render before drawing into it.
+      setTimeout(() => this.goTo(0));
+    } catch (e) {
+      console.error(e);
+      this.loadError.set(
+        "This browser can't open that video. On iPhone, set Settings › Camera › Formats to Most Compatible and record again, or try another browser.",
+      );
+    } finally {
+      this.loading.set(false);
+    }
   }
 
   reset() {
+    this.stopPlay();
     this.abort?.abort();
-    if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
-    this.objectUrl = null;
-    this.src.set(null);
+    clearInterval(this.elapsedTimer);
+    this.source?.dispose();
+    this.source = null;
+    this.loaded.set(false);
     this.info.set(null);
     this.loadError.set(null);
-    this.duration.set(0);
+    this.engine.set(null);
+    this.totalFrames.set(0);
     this.fileFps.set(null);
     this.captureFps.set(null);
     this.currentFrame.set(0);
-    this.playing.set(false);
+    this.shownFrame.set(null);
     this.firstAir.set(null);
     this.firstGround.set(null);
     this.exactFrames.set(null);
@@ -177,50 +180,57 @@ export class Measure implements OnDestroy {
   // ---------- Frame navigation ----------
 
   goTo(frame: number) {
-    const v = this.videoRef()?.nativeElement;
-    const fps = this.fileFps();
-    if (!v || !fps) return;
+    const canvas = this.canvasRef()?.nativeElement;
+    if (!this.source || !canvas) return;
     const max = Math.max(0, this.totalFrames() - 1);
-    const f = Math.min(max, Math.max(0, Math.round(frame)));
-    if (!v.paused) v.pause();
-    this.targetFrame = f;
+    const f = Math.min(max, Math.max(0, Math.round(+frame)));
     this.currentFrame.set(f);
-    // Collapse rapid taps/scrubs into the latest target.
-    this.seekChain = this.seekChain.then(() => (this.targetFrame === f ? seekToFrame(v, f, fps) : undefined));
+    return this.source.show(f, canvas).then(
+      (ok) => {
+        if (ok) this.shownFrame.set(f);
+        return ok;
+      },
+      (e) => {
+        console.error(e);
+        return false;
+      },
+    );
   }
 
   step(delta: number) {
+    this.stopPlay();
     this.goTo(this.currentFrame() + delta);
   }
 
   togglePlay() {
-    const v = this.videoRef()?.nativeElement as FrameCallbackVideo | undefined;
-    const fps = this.fileFps();
-    if (!v || !fps) return;
-    if (!v.paused) {
-      v.pause();
+    if (this.playing()) {
+      this.stopPlay();
       return;
     }
-    v.play();
-    const tick = () => {
-      if (v.paused) return;
-      this.currentFrame.set(timeToFrame(v.currentTime, fps));
-      if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(tick);
-      else requestAnimationFrame(tick);
+    this.playing.set(true);
+    const tick = async () => {
+      if (!this.playing()) return;
+      const next = this.currentFrame() + 1;
+      if (next >= this.totalFrames()) {
+        this.stopPlay();
+        return;
+      }
+      const started = performance.now();
+      await this.goTo(next);
+      // About 30 frames per second on screen: slow motion for high-fps clips.
+      this.playTimer = setTimeout(tick, Math.max(0, 33 - (performance.now() - started)));
     };
     tick();
   }
 
-  onPause() {
+  private stopPlay() {
     this.playing.set(false);
-    const v = this.videoRef()?.nativeElement;
-    const fps = this.fileFps();
-    if (v && fps) this.goTo(timeToFrame(v.currentTime, fps));
+    clearTimeout(this.playTimer);
   }
 
   @HostListener('window:keydown', ['$event'])
   onKey(e: KeyboardEvent) {
-    if (!this.src() || (e.target as HTMLElement)?.closest('input, textarea, select')) return;
+    if (!this.loaded() || (e.target as HTMLElement)?.closest('input, textarea, select')) return;
     const big = e.shiftKey ? 10 : 1;
     if (e.key === 'ArrowRight' || e.key === '.') this.step(big);
     else if (e.key === 'ArrowLeft' || e.key === ',') this.step(-big);
@@ -247,8 +257,10 @@ export class Measure implements OnDestroy {
     const s = which === 'air' ? this.firstAir : this.firstGround;
     const v = s();
     if (v === null) return;
-    s.set(v + delta);
-    this.goTo(v + delta);
+    const next = Math.min(this.totalFrames() - 1, Math.max(0, v + delta));
+    s.set(next);
+    this.stopPlay();
+    this.goTo(next);
     this.touchedMarks();
   }
 
@@ -258,28 +270,27 @@ export class Measure implements OnDestroy {
     if (this.method() === 'auto') this.method.set('auto-adjusted');
   }
 
-  setFileFps(v: number | null) {
-    this.fileFps.set(v && v > 0 ? v : null);
-    this.savedId.set(null);
-  }
-
   setCaptureFps(v: number | null) {
-    this.captureFps.set(v && v > 0 ? v : null);
+    const n = Number(v);
+    this.captureFps.set(n > 0 ? n : null);
     this.savedId.set(null);
   }
 
   // ---------- Auto-detect ----------
 
   async autoDetect() {
-    const v = this.videoRef()?.nativeElement;
-    const fps = this.fileFps();
-    if (!v || !fps || this.detecting()) return;
+    const fps = this.realFps();
+    if (!this.source || !fps || this.detecting()) return;
+    this.stopPlay();
     this.abort = new AbortController();
     this.detecting.set(true);
     this.detectError.set(null);
     this.savedId.set(null);
+    const t0 = performance.now();
+    this.elapsed.set(0);
+    this.elapsedTimer = setInterval(() => this.elapsed.set(Math.round((performance.now() - t0) / 1000)), 500);
     try {
-      const r = await this.pose.detect(v, fps, this.totalFrames(), (p) => this.progress.set(p), this.abort.signal);
+      const r = await this.pose.detect(this.source, fps, (p) => this.progress.set(p), this.abort.signal);
       this.detection.set(r);
       this.firstAir.set(r.firstAir);
       this.firstGround.set(r.firstGround);
@@ -288,11 +299,12 @@ export class Measure implements OnDestroy {
       this.goTo(r.firstAir);
     } catch (e) {
       if ((e as Error).name === 'AbortError') return;
+      console.error(e);
       this.detectError.set(
         e instanceof DetectionError ? e.message : 'Auto-detect failed on this device. Mark the frames by hand instead.',
       );
-      console.error(e);
     } finally {
+      clearInterval(this.elapsedTimer);
       this.detecting.set(false);
       this.progress.set(null);
     }
@@ -300,6 +312,7 @@ export class Measure implements OnDestroy {
 
   cancelDetect() {
     this.abort?.abort();
+    clearInterval(this.elapsedTimer);
     this.detecting.set(false);
     this.progress.set(null);
   }
@@ -326,14 +339,9 @@ export class Measure implements OnDestroy {
   protected progressPct() {
     const p = this.progress();
     if (!p) return 0;
-    if (p.stage === 'loading') return 3;
-    const base = p.stage === 'scanning' ? 0 : 70;
-    const span = p.stage === 'scanning' ? 70 : 30;
+    if (p.stage === 'loading') return 2;
+    const base = p.stage === 'scanning' ? 2 : 75;
+    const span = p.stage === 'scanning' ? 73 : 25;
     return Math.round(base + (span * p.done) / Math.max(1, p.total));
-  }
-
-  protected frameTimeMs(frame: number) {
-    const fps = this.realFps();
-    return fps ? (frame / fps) * 1000 : 0;
   }
 }

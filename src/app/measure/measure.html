@@ -1,4 +1,4 @@
-@if (!src()) {
+@if (!loaded()) {
   <section class="intro">
     <h1>Measure a jump</h1>
     <p class="lede">
@@ -6,10 +6,13 @@
     </p>
 
     <label class="pick">
-      <input type="file" accept="video/*" (change)="onFile($event)" />
-      <span class="btn primary big">Choose a video</span>
+      <input type="file" accept="video/*" (change)="onFile($event)" [disabled]="loading()" />
+      <span class="btn primary big">{{ loading() ? 'Opening video…' : 'Choose a video' }}</span>
       <span class="muted small">Stays on your phone. Nothing is uploaded.</span>
     </label>
+    @if (loadError()) {
+      <p class="error" role="alert">{{ loadError() }}</p>
+    }
 
     <ol class="steps">
       <li><strong>Slow-mo, 240 fps</strong> if your phone has it. 120 is fine, 30 is too coarse.</li>
@@ -25,45 +28,20 @@
       <button class="btn ghost" type="button" (click)="reset()">Load another</button>
     </div>
 
-    <div class="stage">
-      <video
-        #video
-        [src]="src()"
-        playsinline
-        muted
-        preload="auto"
-        (loadedmetadata)="onLoadedMetadata()"
-        (error)="onVideoError()"
-        (play)="playing.set(true)"
-        (pause)="onPause()"
-      ></video>
+    <div class="stage" [attr.data-engine]="engine()">
+      <canvas #frame aria-label="Video frame"></canvas>
       @if (firstAir() === currentFrame()) {
         <span class="tag air">Take-off</span>
       }
       @if (firstGround() === currentFrame()) {
         <span class="tag ground">Landing</span>
       }
+      @if (shownFrame() !== currentFrame()) {
+        <span class="busy">Loading frame…</span>
+      }
     </div>
 
-    @if (loadError()) {
-      <p class="error" role="alert">{{ loadError() }}</p>
-    }
-
     <div class="fps">
-      <div class="field">
-        <label for="fileFps">Video frame rate (fps)</label>
-        <input
-          id="fileFps"
-          type="number"
-          inputmode="decimal"
-          min="1"
-          step="any"
-          [ngModel]="fileFps()"
-          (ngModelChange)="setFileFps($event)"
-          placeholder="e.g. 240"
-        />
-        <span class="hint">{{ info()?.containerFps ? 'Read from the file.' : "Couldn't read it from the file. Enter it." }}</span>
-      </div>
       <div class="field">
         <label for="capFps">Recorded at (fps)</label>
         <input
@@ -72,22 +50,28 @@
           inputmode="decimal"
           min="1"
           step="any"
-          [ngModel]="captureFps()"
+          [ngModel]="realFps()"
           (ngModelChange)="setCaptureFps($event)"
-          [placeholder]="fileFps() ? 'Same: ' + fileFps() : 'e.g. 240'"
+          placeholder="e.g. 240"
         />
-        <span class="hint">Only if the slow-mo was saved as a normal-speed file, e.g. shot at 240, saved at 30.</span>
+        <span class="hint">
+          The file plays at {{ fileFps() }} fps.
+          @if (isSlowedDown()) {
+            It's a slowed-down export, so each frame is 1/{{ realFps() }} s of real time.
+          } @else {
+            If you shot slow-mo and it was saved at normal speed (e.g. shot at 240, saved at 30), enter the real rate.
+          }
+        </span>
       </div>
     </div>
-    @if (lowFps() && !isSlowedDown()) {
+    @if (lowFps()) {
       <p class="warn">
-        At {{ realFps() }} fps each frame is {{ 1000 / (realFps() || 1) | number: '1.0-0' }} ms, so expect about
-        ±{{ result()?.errCm ?? 4 | number: '1.0-0' }} cm. If this is a slow-mo clip that plays back slowly, set
-        "Recorded at" to the real rate.
+        At {{ realFps() }} fps each frame is {{ 1000 / (realFps() || 1) | number: '1.0-0' }} ms, so expect roughly
+        ±{{ result()?.errCm ?? 4 | number: '1.0-0' }} cm. Use 240 fps slow motion for accurate results.
       </p>
     }
 
-    @if (fileFps()) {
+    @if (totalFrames()) {
       <div class="transport" role="group" aria-label="Frame controls">
         <input
           class="scrub"
@@ -116,11 +100,12 @@
             <div class="bar"><span [style.width.%]="progressPct()"></span></div>
             <span class="small">
               @switch (progress()?.stage) {
-                @case ('loading') { Loading the pose model… }
-                @case ('scanning') { Finding the jump… }
-                @case ('refining') { Checking every frame around take-off and landing… }
+                @case ('loading') { Loading the pose model (first time only)… }
+                @case ('scanning') { Finding the jump: {{ progress()!.done }} of {{ progress()!.total }} frames }
+                @case ('refining') { Checking each frame at take-off and landing: {{ progress()!.done }} of {{ progress()!.total }} }
                 @default { Starting… }
               }
+              <span class="muted">({{ elapsed() }} s)</span>
             </span>
             <button class="btn ghost" type="button" (click)="cancelDetect()">Cancel</button>
           </div>

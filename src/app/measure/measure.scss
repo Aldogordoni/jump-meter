@@ -67,12 +67,25 @@
   background: #000;
   border-radius: var(--r-lg);
   overflow: hidden;
-  video {
+  display: grid;
+  place-items: center;
+  min-height: 200px;
+  canvas {
     display: block;
-    width: 100%;
+    max-width: 100%;
     max-height: 58vh;
-    object-fit: contain;
-    background: #000;
+    width: auto;
+    height: auto;
+  }
+  .busy {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 0.8rem;
   }
   .tag {
     position: absolute;
@@ -94,9 +107,9 @@
 
 .fps {
   display: grid;
-  grid-template-columns: 1fr 1fr;
   gap: 12px;
   margin: 14px 0 6px;
+  max-width: 420px;
 }
 
 .transport {
