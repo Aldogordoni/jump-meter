@@ -30,6 +30,17 @@ Phones save slow motion in two ways:
 2. **Normal-speed file** of a slow-mo capture (e.g. 30 fps file, shot at 240). Android usually records
    `com.android.capture.fps` in the metadata, which the app reads. Otherwise enter the real rate in "Recorded at".
 
+## Jump types and metrics
+
+| Type | Marks | Metrics |
+|---|---|---|
+| CMJ, CMJ + arms, squat jump | movement start (optional), take-off, landing | height, flight time, take-off speed, peak power (Sayers), time to take-off, **RSI-modified** = h / time to take-off |
+| Drop jump | box landing, take-off, landing | height, **contact time**, **RSI** = h / contact time, flight : contact ratio |
+| Single-leg L / R | take-off, landing | height per side, **asymmetry %** in History |
+| Approach, other | take-off, landing | height, flight time |
+
+Heights display in **cm or inches** (Setup, or the toggle on the result). They're always stored in cm.
+
 ## Features
 
 - Frame-accurate stepping (`requestVideoFrameCallback`)

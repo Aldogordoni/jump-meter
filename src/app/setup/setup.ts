@@ -50,6 +50,13 @@ import { JUMP_TYPES } from '../core/jump-math';
       <h2>Your details</h2>
       <div class="grid">
         <div class="field">
+          <label for="units">Height units</label>
+          <select id="units" [ngModel]="store.settings().units" (ngModelChange)="store.updateSettings({ units: $event })">
+            <option value="cm">Centimetres (cm)</option>
+            <option value="in">Inches (in)</option>
+          </select>
+        </div>
+        <div class="field">
           <label for="mass">Body mass (kg)</label>
           <input
             id="mass"
@@ -75,6 +82,34 @@ import { JUMP_TYPES } from '../core/jump-math';
     </section>
 
     <section>
+      <h2>Jump types and what they measure</h2>
+      <dl class="metrics">
+        <dt>CMJ, CMJ + arms, squat jump</dt>
+        <dd>
+          Height, flight time, take-off speed and estimated peak power. Mark the <strong>movement start</strong> (the last
+          frame standing still before you dip) to also get <strong>time to take-off</strong> and
+          <strong>RSI-modified</strong> = height (m) ÷ time to take-off (s). RSI-mod shows how quickly you produce your
+          jump: around 0.3 is typical, 0.5+ is very good. Auto-detect finds the movement start for you when there's a
+          clear dip.
+        </dd>
+        <dt>Drop jump</dt>
+        <dd>
+          Step off a box (start around 30 cm / 12 in), land on both feet and jump straight back up as high and fast as
+          you can. The app times <strong>ground contact</strong> from the box landing to take-off, and works out
+          <strong>RSI</strong> = jump height (m) ÷ contact time (s). Above 1.5 is good, 2.0+ is elite. Film from before
+          you step off until after you land. Keep the box and the floor in shot.
+        </dd>
+        <dt>Single-leg left and right</dt>
+        <dd>
+          Countermovement jumps off one leg. With both sides saved, History shows your best on each side and the
+          <strong>asymmetry</strong> between them. Over 10–15% is worth working on.
+        </dd>
+        <dt>Approach</dt>
+        <dd>A run-up jump. Film side-on and make sure your take-off foot stays in frame.</dd>
+      </dl>
+    </section>
+
+    <section>
       <h2>Your data</h2>
       <p>
         Jumps are saved on this device only, in this browser. Export a backup to keep them safe or move them to another
@@ -96,7 +131,7 @@ import { JUMP_TYPES } from '../core/jump-math';
       <h2>How it works</h2>
       <p>
         Going up takes as long as coming down, so the flight time <em>t</em> gives your height directly:
-        <strong>h = g·t² ÷ 8</strong>. A 0.60 s flight is 44.1 cm. This is the same method used by contact mats and the My
+        <strong>h = g·t² ÷ 8</strong>. A 0.60 s flight is 44.1 cm (17.4 in). This is the same method used by contact mats and the My
         Jump app, which have been checked against force plates.
       </p>
       <p>
@@ -122,8 +157,20 @@ import { JUMP_TYPES } from '../core/jump-math';
     }
     .grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px;
+    }
+    .metrics {
+      margin: 0;
+      dt {
+        font-family: var(--display);
+        font-weight: 700;
+        font-size: 1.15rem;
+        margin-top: 14px;
+      }
+      dd {
+        margin: 2px 0 0;
+      }
     }
     .row {
       display: flex;

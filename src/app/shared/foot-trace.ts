@@ -14,6 +14,10 @@ import { FootSample } from '../core/flight-detect';
         <line [attr.x1]="m.ground" y1="8" [attr.x2]="m.ground" [attr.y2]="floorY" class="mark" />
         <text [attr.x]="m.ground - 3" y="16" class="lbl" text-anchor="end">landing</text>
       }
+      @if (contactX() !== null) {
+        <line [attr.x1]="contactX()" y1="8" [attr.x2]="contactX()" [attr.y2]="floorY" class="mark" />
+        <text [attr.x]="contactX()! - 3" y="28" class="lbl" text-anchor="end">box landing</text>
+      }
       @if (cursor() !== null) {
         <line [attr.x1]="cursor()" y1="0" [attr.x2]="cursor()" y2="112" class="cursor" />
       }
@@ -61,6 +65,7 @@ export class FootTrace {
   readonly baseline = input.required<number>();
   readonly firstAir = input<number | null>(null);
   readonly firstGround = input<number | null>(null);
+  readonly contact = input<number | null>(null);
   readonly current = input<number | null>(null);
   readonly seek = output<number>();
 
@@ -87,6 +92,11 @@ export class FootTrace {
     const a = this.firstAir();
     const g = this.firstGround();
     return a === null || g === null ? null : { air: this.x(a), ground: this.x(g) };
+  });
+
+  protected readonly contactX = computed(() => {
+    const c = this.contact();
+    return c === null ? null : this.x(c);
   });
 
   protected readonly cursor = computed(() => {

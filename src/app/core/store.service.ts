@@ -1,15 +1,18 @@
 import { Injectable, computed, effect, signal } from '@angular/core';
-import { JumpRecord, JumpType } from './jump-math';
+import { JumpRecord, JumpType, Units } from './jump-math';
 
 export interface Settings {
   massKg: number | null;
   defaultType: JumpType;
+  units: Units;
+  /** Last box height used for drop jumps, in cm. */
+  boxCm: number | null;
 }
 
 const HISTORY_KEY = 'jump-meter.history.v1';
 const SETTINGS_KEY = 'jump-meter.settings.v1';
 
-const DEFAULT_SETTINGS: Settings = { massKg: null, defaultType: 'CMJ' };
+const DEFAULT_SETTINGS: Settings = { massKg: null, defaultType: 'CMJ', units: 'cm', boxCm: null };
 
 function load<T>(key: string, fallback: T): T {
   try {

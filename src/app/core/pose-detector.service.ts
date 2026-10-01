@@ -1,6 +1,6 @@
 import { Injectable } from '@angular/core';
 import type { PoseLandmarker } from '@mediapipe/tasks-vision';
-import { coarseLocate, DetectionError, FlightEstimate, FootSample, refineFlight } from './flight-detect';
+import { coarseLocate, DetectionError, DetectMode, findMovementStart, FlightEstimate, FootSample, refineFlight } from './flight-detect';
 import { FrameSource } from './frame-source';
 
 const REMOTE_MODEL =
@@ -93,6 +93,7 @@ export class PoseDetectorService {
   async detect(
     source: FrameSource,
     realFps: number,
+    mode: DetectMode,
     onProgress: (p: DetectProgress) => void,
     signal?: AbortSignal,
   ): Promise<DetectResult> {
@@ -145,7 +146,7 @@ export class PoseDetectorService {
         const footY = Math.max(...FOOT_POINTS.map((i) => lm[i].y));
         const hipY = (lm[L_HIP].y + lm[R_HIP].y) / 2;
         const ankleY = (lm[L_ANKLE].y + lm[R_ANKLE].y) / 2;
-        s = { frame, footY, legLen: ankleY - hipY };
+        s = { frame, footY, legLen: ankleY - hipY, hipY };
       }
       cache.set(frame, s);
     };
@@ -170,7 +171,7 @@ export class PoseDetectorService {
       `[jump-meter] scan: ${sparseFrames.length} frames in ${Math.round(performance.now() - tStart)} ms (${delegate})`,
     );
     const sparse = sparseFrames.map((f) => cache.get(f)!).filter(Boolean);
-    const coarse = coarseLocate(sparse);
+    const coarse = coarseLocate(sparse, mode);
 
     // Pass 2: every frame around take-off and landing.
     const pad = Math.max(step, 4);
@@ -181,7 +182,11 @@ export class PoseDetectorService {
     };
     const upFrames = range(coarse.lastGroundBefore - pad, coarse.firstAirCoarse + pad);
     const downFrames = range(coarse.lastAirCoarse - pad, coarse.firstGroundAfter + pad);
-    const dense = [...upFrames, ...downFrames].filter((f) => !cache.has(f));
+    const contactFrames =
+      coarse.dropLastAir !== null && coarse.dropFirstGround !== null
+        ? range(coarse.dropLastAir - pad, coarse.dropFirstGround + pad)
+        : [];
+    const dense = [...contactFrames, ...upFrames, ...downFrames].filter((f) => !cache.has(f));
     done = 0;
     await source.scan(
       dense,
@@ -196,7 +201,9 @@ export class PoseDetectorService {
 
     const up = upFrames.map((f) => cache.get(f)!).filter(Boolean);
     const down = downFrames.map((f) => cache.get(f)!).filter(Boolean);
-    const estimate = refineFlight(coarse, sparse, up, down);
+    const contactWin = contactFrames.map((f) => cache.get(f)!).filter(Boolean);
+    const estimate = refineFlight(coarse, sparse, up, down, contactWin);
+    if (mode === 'single') estimate.movementStart = findMovementStart(coarse, sparse, realFps);
     const trace = [...cache.values()].filter((s) => isFinite(s.footY)).sort((a, b) => a.frame - b.frame);
     return { ...estimate, trace };
   }

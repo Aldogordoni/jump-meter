@@ -1,38 +1,43 @@
 import { Component, computed, input, signal } from '@angular/core';
-import { DecimalPipe, DatePipe } from '@angular/common';
-import { JumpRecord } from '../core/jump-math';
+import { DatePipe } from '@angular/common';
 
-/** Every jump as a dot, with a line through the best jump of each session (day). */
+export interface ChartPoint {
+  id: string;
+  date: string;
+  value: number;
+  /** Text shown for this point, already formatted with units. */
+  text: string;
+  note?: string;
+}
+
+/**
+ * Every jump as a dot, with a line through the best value of each day.
+ * `higherIsBetter` decides which value counts as "best" (contact time: lower).
+ */
 @Component({
   selector: 'app-progress-chart',
-  imports: [DecimalPipe, DatePipe],
+  imports: [DatePipe],
   template: `
     <div class="wrap">
       <svg [attr.viewBox]="'0 0 ' + W + ' ' + H" role="img" [attr.aria-label]="summary()">
         @for (t of yTicks(); track t) {
           <line [attr.x1]="padL" [attr.x2]="W - padR" [attr.y1]="y(t)" [attr.y2]="y(t)" class="grid" />
-          <text [attr.x]="padL - 6" [attr.y]="y(t) + 4" text-anchor="end" class="axis">{{ t }}</text>
+          <text [attr.x]="padL - 6" [attr.y]="y(t) + 4" text-anchor="end" class="axis">{{ fmtTick(t) }}</text>
         }
         <polyline [attr.points]="bestLine()" class="line" />
-        @for (p of dots(); track p.r.id) {
-          <circle
-            [attr.cx]="p.x"
-            [attr.cy]="p.y"
-            [attr.r]="active()?.id === p.r.id ? 6 : 4"
-            [class.best]="p.best"
-            class="dot"
-          />
+        @for (p of dots(); track p.d.id) {
+          <circle [attr.cx]="p.x" [attr.cy]="p.y" [attr.r]="active()?.id === p.d.id ? 6 : 4" [class.best]="p.best" class="dot" />
           <circle
             [attr.cx]="p.x"
             [attr.cy]="p.y"
             r="14"
             class="hit"
             tabindex="0"
-            (pointerenter)="active.set(p.r)"
-            (focus)="active.set(p.r)"
-            (click)="active.set(p.r)"
+            (pointerenter)="active.set(p.d)"
+            (focus)="active.set(p.d)"
+            (click)="active.set(p.d)"
           >
-            <title>{{ p.r.heightCm }} cm, {{ p.r.date | date: 'd MMM' }}</title>
+            <title>{{ p.d.text }}, {{ p.d.date | date: 'd MMM' }}</title>
           </circle>
         }
         <text [attr.x]="padL" [attr.y]="H - 4" class="axis">{{ first() | date: 'd MMM' }}</text>
@@ -40,10 +45,10 @@ import { JumpRecord } from '../core/jump-math';
       </svg>
       <p class="tip" aria-live="polite">
         @if (active(); as a) {
-          <strong class="num">{{ a.heightCm | number: '1.1-1' }} cm</strong>
-          {{ a.type }} on {{ a.date | date: 'EEE d MMM, HH:mm' }}@if (a.note) {, {{ a.note }}}
+          <strong class="num">{{ a.text }}</strong>
+          on {{ a.date | date: 'EEE d MMM, HH:mm' }}@if (a.note) {, {{ a.note }}}
         } @else {
-          Tap a dot for details. The line follows your best jump each day.
+          Tap a dot for details. The line follows your best each day.
         }
       </p>
     </div>
@@ -95,34 +100,47 @@ import { JumpRecord } from '../core/jump-math';
   `,
 })
 export class ProgressChart {
-  readonly records = input.required<JumpRecord[]>();
-  protected readonly active = signal<JumpRecord | null>(null);
+  readonly points = input.required<ChartPoint[]>();
+  readonly higherIsBetter = input(true);
+  /** Decimal places on the axis. */
+  readonly digits = input(0);
+  readonly metricName = input('Value');
+  protected readonly active = signal<ChartPoint | null>(null);
 
   protected readonly W = 340;
   protected readonly H = 190;
-  protected readonly padL = 30;
+  protected readonly padL = 34;
   protected readonly padR = 10;
   private readonly padT = 10;
   private readonly padB = 22;
 
-  private readonly sorted = computed(() => [...this.records()].sort((a, b) => a.date.localeCompare(b.date)));
+  private readonly sorted = computed(() => [...this.points()].sort((a, b) => a.date.localeCompare(b.date)));
   protected readonly first = computed(() => this.sorted()[0]?.date);
   protected readonly last = computed(() => this.sorted().at(-1)?.date);
 
   private readonly yDomain = computed(() => {
-    const hs = this.sorted().map((r) => r.heightCm);
-    const lo = Math.floor((Math.min(...hs) - 3) / 5) * 5;
-    const hi = Math.ceil((Math.max(...hs) + 3) / 5) * 5;
-    return { lo: Math.max(0, lo), hi: Math.max(hi, lo + 10) };
+    const vs = this.sorted().map((p) => p.value);
+    const lo = Math.min(...vs);
+    const hi = Math.max(...vs);
+    const span = Math.max(hi - lo, Math.abs(hi) * 0.1, 1e-6);
+    const step = niceStep(span / 3);
+    const a = Math.max(0, Math.floor((lo - span * 0.15) / step) * step);
+    const b = Math.ceil((hi + span * 0.15) / step) * step;
+    return { lo: a, hi: b > a ? b : a + step, step };
   });
 
   protected readonly yTicks = computed(() => {
-    const { lo, hi } = this.yDomain();
-    const step = hi - lo > 40 ? 10 : 5;
+    const { lo, hi, step } = this.yDomain();
     const out: number[] = [];
-    for (let t = lo; t <= hi; t += step) out.push(t);
+    for (let t = lo; t <= hi + step / 2; t += step) out.push(Math.round(t * 1000) / 1000);
     return out;
   });
+
+  protected fmtTick(t: number) {
+    const step = this.yDomain().step;
+    const d = step >= 1 ? 0 : step >= 0.1 ? 1 : 2;
+    return t.toFixed(Math.max(d, 0));
+  }
 
   protected y(v: number) {
     const { lo, hi } = this.yDomain();
@@ -137,28 +155,34 @@ export class ProgressChart {
   }
 
   private readonly dailyBest = computed(() => {
-    const map = new Map<string, JumpRecord>();
-    for (const r of this.sorted()) {
-      const day = r.date.slice(0, 10);
+    const better = (a: number, b: number) => (this.higherIsBetter() ? a > b : a < b);
+    const map = new Map<string, ChartPoint>();
+    for (const p of this.sorted()) {
+      const day = p.date.slice(0, 10);
       const cur = map.get(day);
-      if (!cur || r.heightCm > cur.heightCm) map.set(day, r);
+      if (!cur || better(p.value, cur.value)) map.set(day, p);
     }
     return map;
   });
 
   protected readonly dots = computed(() => {
-    const bestIds = new Set([...this.dailyBest().values()].map((r) => r.id));
-    return this.sorted().map((r) => ({ r, x: this.x(r.date), y: this.y(r.heightCm), best: bestIds.has(r.id) }));
+    const bestIds = new Set([...this.dailyBest().values()].map((p) => p.id));
+    return this.sorted().map((d) => ({ d, x: this.x(d.date), y: this.y(d.value), best: bestIds.has(d.id) }));
   });
 
   protected readonly bestLine = computed(() =>
-    [...this.dailyBest().values()].map((r) => `${this.x(r.date).toFixed(1)},${this.y(r.heightCm).toFixed(1)}`).join(' '),
+    [...this.dailyBest().values()].map((p) => `${this.x(p.date).toFixed(1)},${this.y(p.value).toFixed(1)}`).join(' '),
   );
 
   protected readonly summary = computed(() => {
     const s = this.sorted();
-    if (!s.length) return 'No jumps yet';
-    const best = Math.max(...s.map((r) => r.heightCm));
-    return `${s.length} jumps from ${s[0].date.slice(0, 10)} to ${s.at(-1)!.date.slice(0, 10)}, best ${best} cm`;
+    if (!s.length) return 'No data yet';
+    return `${this.metricName()} for ${s.length} jumps from ${s[0].date.slice(0, 10)} to ${s.at(-1)!.date.slice(0, 10)}`;
   });
+}
+
+function niceStep(raw: number): number {
+  const p = 10 ** Math.floor(Math.log10(raw));
+  const n = raw / p;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * p;
 }

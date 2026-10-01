@@ -3,33 +3,68 @@ import { DecimalPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import {
+  JUMP_TYPE_HINT,
   JUMP_TYPES,
   JumpType,
+  Units,
+  fromUnits,
   heightFromFlight,
   heightUncertaintyCm,
+  isDropJump,
+  rsi,
+  rsiMod,
   sayersPower,
   takeoffVelocity,
+  toUnits,
 } from '../core/jump-math';
 import { readVideoInfo, VideoInfo } from '../core/mp4-info';
 import { StoreService } from '../core/store.service';
 import { FrameSource, openFrameSource } from '../core/frame-source';
 import { DetectProgress, DetectResult, PoseDetectorService } from '../core/pose-detector.service';
 import { DetectionError } from '../core/flight-detect';
+import { HeightPipe } from '../core/height.pipe';
 import { VaneGauge } from '../shared/vane-gauge';
 import { FootTrace } from '../shared/foot-trace';
 
+export type MarkKey = 'start' | 'contact' | 'air' | 'ground';
+
+interface MarkDef {
+  key: MarkKey;
+  title: string;
+  hint: string;
+  optional?: boolean;
+}
+
+const MARKS: Record<MarkKey, MarkDef> = {
+  start: {
+    key: 'start',
+    title: 'Movement start',
+    hint: 'Last frame standing still, before you dip. Optional: adds time to take-off and RSI-modified.',
+    optional: true,
+  },
+  contact: { key: 'contact', title: 'Box landing', hint: 'First frame touching the floor after stepping off the box.' },
+  air: { key: 'air', title: 'Take-off', hint: 'First frame with both feet off the ground.' },
+  ground: { key: 'ground', title: 'Landing', hint: 'First frame touching the ground again.' },
+};
+
+const NO_MARKS: Record<MarkKey, number | null> = { start: null, contact: null, air: null, ground: null };
+
+/** Jump types where the Sayers power equation applies. */
+const POWER_TYPES: JumpType[] = ['CMJ', 'CMJ + arms', 'Squat jump'];
+
 @Component({
   selector: 'app-measure',
-  imports: [FormsModule, DecimalPipe, RouterLink, VaneGauge, FootTrace],
+  imports: [FormsModule, DecimalPipe, RouterLink, VaneGauge, FootTrace, HeightPipe],
   templateUrl: './measure.html',
   styleUrl: './measure.scss',
 })
 export class Measure implements OnDestroy {
-  private readonly store = inject(StoreService);
+  protected readonly store = inject(StoreService);
   private readonly pose = inject(PoseDetectorService);
 
   protected readonly canvasRef = viewChild<ElementRef<HTMLCanvasElement>>('frame');
   protected readonly jumpTypes = JUMP_TYPES;
+  protected readonly typeHint = JUMP_TYPE_HINT;
 
   // Video
   protected readonly loaded = signal(false);
@@ -47,12 +82,16 @@ export class Measure implements OnDestroy {
   protected readonly shownFrame = signal<number | null>(null);
   protected readonly playing = signal(false);
 
-  // Marks
-  protected readonly firstAir = signal<number | null>(null);
-  protected readonly firstGround = signal<number | null>(null);
-  /** Sub-frame flight length from auto-detection; cleared on manual edits. */
-  protected readonly exactFrames = signal<number | null>(null);
+  // Jump type and marks
+  protected readonly type = signal<JumpType>(this.store.settings().defaultType);
+  protected readonly isDrop = computed(() => isDropJump(this.type()));
+  protected readonly marks = signal<Record<MarkKey, number | null>>({ ...NO_MARKS });
+  /** Sub-frame instants from auto-detection; each is dropped when its mark is edited. */
+  protected readonly exact = signal<Partial<Record<MarkKey, number>>>({});
   protected readonly method = signal<'manual' | 'auto' | 'auto-adjusted'>('manual');
+  protected readonly markDefs = computed<MarkDef[]>(() =>
+    this.isDrop() ? [MARKS.contact, MARKS.air, MARKS.ground] : [MARKS.start, MARKS.air, MARKS.ground],
+  );
 
   // Auto-detect
   protected readonly detecting = signal(false);
@@ -63,9 +102,14 @@ export class Measure implements OnDestroy {
   private abort?: AbortController;
 
   // Save
-  protected readonly type = signal<JumpType>(this.store.settings().defaultType);
   protected readonly note = signal('');
   protected readonly savedId = signal<string | null>(null);
+
+  protected readonly units = computed(() => this.store.settings().units);
+  protected readonly boxInUnits = computed(() => {
+    const cm = this.store.settings().boxCm;
+    return cm === null ? null : Math.round(toUnits(cm, this.units()) * 10) / 10;
+  });
 
   protected readonly realFps = computed(() => this.captureFps() ?? this.fileFps());
   protected readonly isSlowedDown = computed(() => {
@@ -75,28 +119,64 @@ export class Measure implements OnDestroy {
   });
   protected readonly lowFps = computed(() => (this.realFps() ?? 0) > 0 && (this.realFps() ?? 0) < 100);
 
-  protected readonly flightFrames = computed(() => {
-    const a = this.firstAir();
-    const g = this.firstGround();
-    if (a === null || g === null || g <= a) return null;
-    return this.exactFrames() ?? g - a;
+  /** Mark position, using the sub-frame instant when auto-detect provided one. */
+  private at(key: MarkKey): number | null {
+    return this.exact()[key] ?? this.marks()[key];
+  }
+
+  protected readonly orderError = computed(() => {
+    const m = this.marks();
+    if (m.air !== null && m.ground !== null && m.ground <= m.air) return 'Landing has to come after take-off.';
+    if (this.isDrop() && m.contact !== null && m.air !== null && m.air <= m.contact)
+      return 'Take-off has to come after the box landing.';
+    if (!this.isDrop() && m.start !== null && m.air !== null && m.air <= m.start)
+      return 'Movement start has to come before take-off.';
+    return null;
   });
 
   protected readonly result = computed(() => {
-    const frames = this.flightFrames();
     const fps = this.realFps();
-    if (frames === null || !fps) return null;
+    const air = this.at('air');
+    const ground = this.at('ground');
+    if (!fps || air === null || ground === null || ground <= air) return null;
+    const frames = ground - air;
     const flight = frames / fps;
     const heightCm = heightFromFlight(flight) * 100;
     const mass = this.store.settings().massKg;
+
+    let contactMs: number | null = null;
+    let rsiValue: number | null = null;
+    let fctRatio: number | null = null;
+    const contact = this.at('contact');
+    if (this.isDrop() && contact !== null && air > contact) {
+      const ct = (air - contact) / fps;
+      contactMs = ct * 1000;
+      rsiValue = rsi(heightCm, ct);
+      fctRatio = flight / ct;
+    }
+
+    let tttMs: number | null = null;
+    let rsiModValue: number | null = null;
+    const start = this.marks().start;
+    if (!this.isDrop() && start !== null && air > start) {
+      const ttt = (air - start) / fps;
+      tttMs = ttt * 1000;
+      rsiModValue = rsiMod(heightCm, ttt);
+    }
+
     return {
       flightMs: flight * 1000,
       heightCm,
       velocity: takeoffVelocity(flight),
-      errCm: heightUncertaintyCm(flight, fps) * (this.exactFrames() !== null ? 0.5 : 1),
-      powerW: mass ? sayersPower(heightCm, mass) : null,
+      errCm: heightUncertaintyCm(flight, fps) * (this.exact().air !== undefined && this.exact().ground !== undefined ? 0.5 : 1),
+      powerW: mass && POWER_TYPES.includes(this.type()) ? sayersPower(heightCm, mass) : null,
       frames,
-      implausible: flight < 0.15 || flight > 1.1,
+      contactMs,
+      rsi: rsiValue,
+      fctRatio,
+      tttMs,
+      rsiMod: rsiModValue,
+      implausible: flight < 0.15 || flight > 1.1 || (contactMs !== null && (contactMs < 80 || contactMs > 1000)),
     };
   });
 
@@ -165,16 +245,27 @@ export class Measure implements OnDestroy {
     this.captureFps.set(null);
     this.currentFrame.set(0);
     this.shownFrame.set(null);
-    this.firstAir.set(null);
-    this.firstGround.set(null);
-    this.exactFrames.set(null);
-    this.method.set('manual');
+    this.clearMarks();
     this.detecting.set(false);
-    this.detectError.set(null);
-    this.detection.set(null);
     this.progress.set(null);
     this.note.set('');
+  }
+
+  private clearMarks() {
+    this.marks.set({ ...NO_MARKS });
+    this.exact.set({});
+    this.method.set('manual');
+    this.detection.set(null);
+    this.detectError.set(null);
     this.savedId.set(null);
+  }
+
+  setType(t: JumpType) {
+    const wasDrop = this.isDrop();
+    this.type.set(t);
+    this.savedId.set(null);
+    // Drop jumps time different events, so earlier auto-detection no longer applies.
+    if (wasDrop !== isDropJump(t) && this.detection()) this.clearMarks();
   }
 
   // ---------- Frame navigation ----------
@@ -234,8 +325,8 @@ export class Measure implements OnDestroy {
     const big = e.shiftKey ? 10 : 1;
     if (e.key === 'ArrowRight' || e.key === '.') this.step(big);
     else if (e.key === 'ArrowLeft' || e.key === ',') this.step(-big);
-    else if (e.key === 'a') this.markAir();
-    else if (e.key === 'l') this.markGround();
+    else if (e.key === 'a') this.setMark('air');
+    else if (e.key === 'l') this.setMark('ground');
     else if (e.key === ' ') this.togglePlay();
     else return;
     e.preventDefault();
@@ -243,30 +334,39 @@ export class Measure implements OnDestroy {
 
   // ---------- Marking ----------
 
-  markAir() {
-    this.firstAir.set(this.currentFrame());
-    this.touchedMarks();
+  protected markAt(key: MarkKey) {
+    return this.marks()[key];
   }
 
-  markGround() {
-    this.firstGround.set(this.currentFrame());
-    this.touchedMarks();
+  protected markOnFrame(frame: number): MarkDef | undefined {
+    return this.markDefs().find((d) => this.marks()[d.key] === frame);
   }
 
-  nudge(which: 'air' | 'ground', delta: number) {
-    const s = which === 'air' ? this.firstAir : this.firstGround;
-    const v = s();
+  setMark(key: MarkKey, frame = this.currentFrame()) {
+    this.marks.update((m) => ({ ...m, [key]: frame }));
+    this.touched(key);
+  }
+
+  clearMark(key: MarkKey) {
+    this.marks.update((m) => ({ ...m, [key]: null }));
+    this.touched(key);
+  }
+
+  nudge(key: MarkKey, delta: number) {
+    const v = this.marks()[key];
     if (v === null) return;
     const next = Math.min(this.totalFrames() - 1, Math.max(0, v + delta));
-    s.set(next);
+    this.setMark(key, next);
     this.stopPlay();
     this.goTo(next);
-    this.touchedMarks();
   }
 
-  private touchedMarks() {
+  private touched(key: MarkKey) {
     this.savedId.set(null);
-    this.exactFrames.set(null);
+    this.exact.update((e) => {
+      const { [key]: _, ...rest } = e;
+      return rest;
+    });
     if (this.method() === 'auto') this.method.set('auto-adjusted');
   }
 
@@ -274,6 +374,16 @@ export class Measure implements OnDestroy {
     const n = Number(v);
     this.captureFps.set(n > 0 ? n : null);
     this.savedId.set(null);
+  }
+
+  setBox(v: number | null) {
+    const n = Number(v);
+    this.store.updateSettings({ boxCm: n > 0 ? Math.round(fromUnits(n, this.units()) * 10) / 10 : null });
+    this.savedId.set(null);
+  }
+
+  setUnits(u: Units) {
+    this.store.updateSettings({ units: u });
   }
 
   // ---------- Auto-detect ----------
@@ -290,11 +400,13 @@ export class Measure implements OnDestroy {
     this.elapsed.set(0);
     this.elapsedTimer = setInterval(() => this.elapsed.set(Math.round((performance.now() - t0) / 1000)), 500);
     try {
-      const r = await this.pose.detect(this.source, fps, (p) => this.progress.set(p), this.abort.signal);
+      const mode = this.isDrop() ? 'drop' : 'single';
+      const r = await this.pose.detect(this.source, fps, mode, (p) => this.progress.set(p), this.abort.signal);
       this.detection.set(r);
-      this.firstAir.set(r.firstAir);
-      this.firstGround.set(r.firstGround);
-      this.exactFrames.set(r.landingExact - r.takeoffExact);
+      this.marks.set({ start: r.movementStart, contact: r.contact, air: r.firstAir, ground: r.firstGround });
+      const ex: Partial<Record<MarkKey, number>> = { air: r.takeoffExact, ground: r.landingExact };
+      if (r.contactExact !== null) ex.contact = r.contactExact;
+      this.exact.set(ex);
       this.method.set('auto');
       this.goTo(r.firstAir);
     } catch (e) {
@@ -322,16 +434,22 @@ export class Measure implements OnDestroy {
   save() {
     const r = this.result();
     const fps = this.realFps();
-    if (!r || !fps) return;
+    if (!r || !fps || this.orderError()) return;
+    const round = (v: number | null, d = 1) => (v === null ? undefined : Math.round(v * 10 ** d) / 10 ** d);
     const rec = this.store.add({
       date: new Date().toISOString(),
-      heightCm: Math.round(r.heightCm * 10) / 10,
-      flightMs: Math.round(r.flightMs * 10) / 10,
+      heightCm: round(r.heightCm)!,
+      flightMs: round(r.flightMs)!,
       captureFps: fps,
-      frames: Math.round(r.frames * 100) / 100,
+      frames: round(r.frames, 2)!,
       type: this.type(),
       method: this.method(),
       note: this.note().trim() || undefined,
+      contactMs: round(r.contactMs),
+      rsi: round(r.rsi, 2),
+      boxCm: this.isDrop() ? (this.store.settings().boxCm ?? undefined) : undefined,
+      timeToTakeoffMs: round(r.tttMs),
+      rsiMod: round(r.rsiMod, 2),
     });
     this.savedId.set(rec.id);
   }
