@@ -1,0 +1,272 @@
+:host {
+  display: block;
+}
+
+.small {
+  font-size: 0.85rem;
+}
+
+.lede {
+  font-size: 1.1rem;
+  max-width: 34em;
+}
+
+.pick {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 20px 0 28px;
+  cursor: pointer;
+  input {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+  }
+  &:focus-within .btn {
+    outline: 3px solid var(--focus);
+    outline-offset: 2px;
+  }
+}
+.btn.big {
+  min-height: 56px;
+  font-size: 1.15rem;
+  padding: 0.6em 1.6em;
+}
+
+.steps {
+  margin: 0 0 12px;
+  padding-left: 1.3em;
+  display: grid;
+  gap: 10px;
+  max-width: 36em;
+  li::marker {
+    font-family: var(--display);
+    font-weight: 700;
+    color: var(--red);
+  }
+}
+
+.file-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  .fname {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink-soft);
+    font-size: 0.9rem;
+  }
+}
+
+.stage {
+  position: relative;
+  background: #000;
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  video {
+    display: block;
+    width: 100%;
+    max-height: 58vh;
+    object-fit: contain;
+    background: #000;
+  }
+  .tag {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-family: var(--display);
+    font-weight: 700;
+    color: #fff;
+    &.air {
+      background: var(--blue);
+    }
+    &.ground {
+      background: var(--red);
+    }
+  }
+}
+
+.fps {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 14px 0 6px;
+}
+
+.transport {
+  margin: 14px 0;
+  .scrub {
+    width: 100%;
+    height: 32px;
+    accent-color: var(--red);
+  }
+  .readout {
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin: 2px 0 8px;
+  }
+  .buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1.4fr 1fr 1fr;
+    gap: 6px;
+    .btn {
+      padding-inline: 0;
+      font-family: var(--display);
+      font-size: 1.1rem;
+    }
+    .play {
+      background: var(--ink);
+      color: var(--paper);
+    }
+  }
+}
+
+.auto {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  margin: 18px 0;
+  .progress {
+    display: grid;
+    gap: 6px;
+    width: 100%;
+    justify-items: start;
+  }
+  .bar {
+    width: 100%;
+    height: 8px;
+    background: var(--line);
+    border-radius: 4px;
+    overflow: hidden;
+    span {
+      display: block;
+      height: 100%;
+      background: var(--blue);
+      transition: width 200ms linear;
+    }
+  }
+}
+
+.marks {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.mark-card {
+  background: var(--surface);
+  border: 1.5px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 12px;
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  h3 {
+    margin: 0;
+  }
+  p {
+    margin: 0;
+  }
+  &.set {
+    border-color: var(--ink);
+  }
+  .mark-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    .btn {
+      padding-inline: 0.5em;
+    }
+    .frame {
+      font-size: 1.2rem;
+      font-weight: 700;
+    }
+  }
+}
+
+.trace {
+  margin: 16px 0 0;
+  padding: 12px;
+  background: var(--surface);
+  border-radius: var(--r-lg);
+  figcaption {
+    margin-top: 6px;
+  }
+}
+
+.result {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 3px solid var(--ink);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.stats {
+  dl {
+    margin: 0 0 10px;
+    display: grid;
+    gap: 10px;
+  }
+  dt {
+    font-size: 0.85rem;
+    color: var(--ink-soft);
+  }
+  dd {
+    margin: 0;
+    font-size: 1.6rem;
+    font-weight: 700;
+    line-height: 1.1;
+  }
+}
+
+.save {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  .btn {
+    width: 100%;
+  }
+}
+
+.saved {
+  font-weight: 600;
+  color: var(--ok);
+}
+
+.warn,
+.error {
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  border-left: 4px solid;
+  font-size: 0.92rem;
+  margin: 10px 0;
+  background: var(--surface);
+}
+.warn {
+  border-color: var(--blue);
+}
+.error {
+  border-color: var(--red);
+}
+
+@media (max-width: 520px) {
+  .fps,
+  .marks {
+    grid-template-columns: 1fr;
+  }
+  .result {
+    grid-template-columns: 1fr;
+  }
+  .gauge-wrap {
+    max-width: 300px;
+  }
+}

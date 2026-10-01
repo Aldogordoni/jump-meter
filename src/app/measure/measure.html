@@ -1,0 +1,242 @@
+@if (!src()) {
+  <section class="intro">
+    <h1>Measure a jump</h1>
+    <p class="lede">
+      Load a slow-motion video of your jump. The app times how long you're in the air and turns that into height.
+    </p>
+
+    <label class="pick">
+      <input type="file" accept="video/*" (change)="onFile($event)" />
+      <span class="btn primary big">Choose a video</span>
+      <span class="muted small">Stays on your phone. Nothing is uploaded.</span>
+    </label>
+
+    <ol class="steps">
+      <li><strong>Slow-mo, 240 fps</strong> if your phone has it. 120 is fine, 30 is too coarse.</li>
+      <li><strong>Phone on the floor</strong>, side-on, about 2 m away, with your feet clearly in frame.</li>
+      <li><strong>Land the way you took off</strong>: straight legs, toes pointed. Tucking your knees adds fake centimetres.</li>
+    </ol>
+    <p class="muted small">More detail in <a routerLink="/setup">Setup</a>.</p>
+  </section>
+} @else {
+  <section class="player">
+    <div class="file-row">
+      <span class="fname" [title]="fileName()">{{ fileName() }}</span>
+      <button class="btn ghost" type="button" (click)="reset()">Load another</button>
+    </div>
+
+    <div class="stage">
+      <video
+        #video
+        [src]="src()"
+        playsinline
+        muted
+        preload="auto"
+        (loadedmetadata)="onLoadedMetadata()"
+        (error)="onVideoError()"
+        (play)="playing.set(true)"
+        (pause)="onPause()"
+      ></video>
+      @if (firstAir() === currentFrame()) {
+        <span class="tag air">Take-off</span>
+      }
+      @if (firstGround() === currentFrame()) {
+        <span class="tag ground">Landing</span>
+      }
+    </div>
+
+    @if (loadError()) {
+      <p class="error" role="alert">{{ loadError() }}</p>
+    }
+
+    <div class="fps">
+      <div class="field">
+        <label for="fileFps">Video frame rate (fps)</label>
+        <input
+          id="fileFps"
+          type="number"
+          inputmode="decimal"
+          min="1"
+          step="any"
+          [ngModel]="fileFps()"
+          (ngModelChange)="setFileFps($event)"
+          placeholder="e.g. 240"
+        />
+        <span class="hint">{{ info()?.containerFps ? 'Read from the file.' : "Couldn't read it from the file. Enter it." }}</span>
+      </div>
+      <div class="field">
+        <label for="capFps">Recorded at (fps)</label>
+        <input
+          id="capFps"
+          type="number"
+          inputmode="decimal"
+          min="1"
+          step="any"
+          [ngModel]="captureFps()"
+          (ngModelChange)="setCaptureFps($event)"
+          [placeholder]="fileFps() ? 'Same: ' + fileFps() : 'e.g. 240'"
+        />
+        <span class="hint">Only if the slow-mo was saved as a normal-speed file, e.g. shot at 240, saved at 30.</span>
+      </div>
+    </div>
+    @if (lowFps() && !isSlowedDown()) {
+      <p class="warn">
+        At {{ realFps() }} fps each frame is {{ 1000 / (realFps() || 1) | number: '1.0-0' }} ms, so expect about
+        ±{{ result()?.errCm ?? 4 | number: '1.0-0' }} cm. If this is a slow-mo clip that plays back slowly, set
+        "Recorded at" to the real rate.
+      </p>
+    }
+
+    @if (fileFps()) {
+      <div class="transport" role="group" aria-label="Frame controls">
+        <input
+          class="scrub"
+          type="range"
+          min="0"
+          [max]="totalFrames() - 1"
+          [ngModel]="currentFrame()"
+          (ngModelChange)="goTo($event)"
+          aria-label="Frame"
+        />
+        <div class="readout num">
+          Frame {{ currentFrame() }} <span class="muted">of {{ totalFrames() - 1 }}</span>
+        </div>
+        <div class="buttons">
+          <button class="btn" type="button" (click)="step(-10)" aria-label="Back 10 frames">−10</button>
+          <button class="btn" type="button" (click)="step(-1)" aria-label="Back 1 frame">−1</button>
+          <button class="btn play" type="button" (click)="togglePlay()">{{ playing() ? 'Pause' : 'Play' }}</button>
+          <button class="btn" type="button" (click)="step(1)" aria-label="Forward 1 frame">+1</button>
+          <button class="btn" type="button" (click)="step(10)" aria-label="Forward 10 frames">+10</button>
+        </div>
+      </div>
+
+      <div class="auto">
+        @if (detecting()) {
+          <div class="progress" role="status">
+            <div class="bar"><span [style.width.%]="progressPct()"></span></div>
+            <span class="small">
+              @switch (progress()?.stage) {
+                @case ('loading') { Loading the pose model… }
+                @case ('scanning') { Finding the jump… }
+                @case ('refining') { Checking every frame around take-off and landing… }
+                @default { Starting… }
+              }
+            </span>
+            <button class="btn ghost" type="button" (click)="cancelDetect()">Cancel</button>
+          </div>
+        } @else {
+          <button class="btn primary" type="button" (click)="autoDetect()">Find take-off and landing for me</button>
+          <span class="small muted">Tracks your feet with on-device AI. Check the result and nudge it if needed.</span>
+        }
+        @if (detectError()) {
+          <p class="error" role="alert">{{ detectError() }}</p>
+        }
+      </div>
+
+      <div class="marks">
+        <div class="mark-card" [class.set]="firstAir() !== null">
+          <h3>Take-off</h3>
+          <p class="small muted">First frame with both feet off the ground.</p>
+          @if (firstAir() !== null) {
+            <div class="mark-row">
+              <button class="btn ghost" type="button" (click)="nudge('air', -1)" aria-label="Take-off one frame earlier">−1</button>
+              <button class="btn ghost num frame" type="button" (click)="goTo(firstAir()!)">Frame {{ firstAir() }}</button>
+              <button class="btn ghost" type="button" (click)="nudge('air', 1)" aria-label="Take-off one frame later">+1</button>
+            </div>
+          }
+          <button class="btn" type="button" (click)="markAir()">Set to frame {{ currentFrame() }}</button>
+        </div>
+        <div class="mark-card" [class.set]="firstGround() !== null">
+          <h3>Landing</h3>
+          <p class="small muted">First frame touching the ground again.</p>
+          @if (firstGround() !== null) {
+            <div class="mark-row">
+              <button class="btn ghost" type="button" (click)="nudge('ground', -1)" aria-label="Landing one frame earlier">−1</button>
+              <button class="btn ghost num frame" type="button" (click)="goTo(firstGround()!)">Frame {{ firstGround() }}</button>
+              <button class="btn ghost" type="button" (click)="nudge('ground', 1)" aria-label="Landing one frame later">+1</button>
+            </div>
+          }
+          <button class="btn" type="button" (click)="markGround()">Set to frame {{ currentFrame() }}</button>
+        </div>
+      </div>
+
+      @if (detection(); as d) {
+        <figure class="trace">
+          <app-foot-trace
+            [trace]="d.trace"
+            [baseline]="d.baselineBefore"
+            [firstAir]="firstAir()"
+            [firstGround]="firstGround()"
+            [current]="currentFrame()"
+            (seek)="goTo($event)"
+          />
+          <figcaption class="small muted">Foot height the AI saw. Tap the graph to jump to that frame.</figcaption>
+        </figure>
+      }
+
+      @if (firstAir() !== null && firstGround() !== null && firstGround()! <= firstAir()!) {
+        <p class="error" role="alert">Landing has to come after take-off. Check the two frames.</p>
+      }
+    }
+  </section>
+
+  @if (result(); as r) {
+    <section class="result" aria-live="polite">
+      <div class="gauge-wrap">
+        <app-vane-gauge [heightCm]="r.heightCm" />
+      </div>
+      <div class="stats">
+        <dl>
+          <div>
+            <dt>Flight time</dt>
+            <dd class="num">{{ r.flightMs | number: '1.0-0' }} ms</dd>
+          </div>
+          <div>
+            <dt>Take-off speed</dt>
+            <dd class="num">{{ r.velocity | number: '1.2-2' }} m/s</dd>
+          </div>
+          <div>
+            <dt>Timing accuracy</dt>
+            <dd class="num">±{{ r.errCm | number: '1.1-1' }} cm</dd>
+          </div>
+          @if (r.powerW !== null) {
+            <div>
+              <dt>Peak power (est.)</dt>
+              <dd class="num">{{ r.powerW | number: '1.0-0' }} W</dd>
+            </div>
+          }
+        </dl>
+        <p class="small muted">
+          {{ r.frames | number: '1.0-2' }} frames at {{ realFps() }} fps.
+          @if (method() === 'auto') { Sub-frame timing from the AI. }
+          @if (best(); as b) {
+            Your best {{ type() }} is {{ b.heightCm | number: '1.1-1' }} cm.
+          }
+        </p>
+        @if (r.implausible) {
+          <p class="warn">That flight time is outside a normal jump (0.15–1.1 s). Check the frames and the fps.</p>
+        }
+
+        <div class="save">
+          <div class="field">
+            <label for="type">Jump type</label>
+            <select id="type" [ngModel]="type()" (ngModelChange)="type.set($event); savedId.set(null)">
+              @for (t of jumpTypes; track t) {
+                <option [value]="t">{{ t }}</option>
+              }
+            </select>
+          </div>
+          <div class="field">
+            <label for="note">Note</label>
+            <input id="note" type="text" [ngModel]="note()" (ngModelChange)="note.set($event)" placeholder="e.g. after warm-up, trainers" />
+          </div>
+          @if (savedId()) {
+            <p class="saved" role="status">Saved. <a routerLink="/history">See history</a></p>
+          } @else {
+            <button class="btn primary" type="button" (click)="save()">Save jump</button>
+          }
+        </div>
+      </div>
+    </section>
+  }
+}
