@@ -1,4 +1,5 @@
-import { Component } from '@angular/core';
+import { Component, inject } from '@angular/core';
+import { SwUpdate } from '@angular/service-worker';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 
 @Component({
@@ -79,4 +80,15 @@ import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
     }
   `,
 })
-export class App {}
+export class App {
+  constructor() {
+    // Apply new versions straight away, so fixes reach the installed app without a double refresh.
+    const sw = inject(SwUpdate);
+    if (sw.isEnabled) {
+      sw.versionUpdates.subscribe((e) => {
+        if (e.type === 'VERSION_READY' && !document.querySelector('app-measure canvas')) location.reload();
+      });
+      sw.checkForUpdate().catch(() => undefined);
+    }
+  }
+}
