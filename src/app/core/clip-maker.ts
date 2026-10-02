@@ -24,7 +24,7 @@ export interface ClipOptions {
 }
 
 const OUT_FPS = 30;
-const MAX_SIDE = 720;
+const MAX_SIDE = 1080;
 const HOLD_FRAMES = 18; // 0.6 s pause on each key frame
 const MAX_SOURCE_FRAMES = 420;
 
@@ -143,7 +143,7 @@ async function createEncoder(canvas: HTMLCanvasElement): Promise<Encoder> {
         codec,
         width: canvas.width,
         height: canvas.height,
-        bitrate: 4_000_000,
+        bitrate: 8_000_000,
         framerate: OUT_FPS,
         ...(kind === 'avc' ? { avc: { format: 'avc' as const } } : {}),
       };
@@ -198,7 +198,7 @@ function mediaRecorderEncoder(canvas: HTMLCanvasElement): Encoder {
   );
   const stream = canvas.captureStream(0);
   const track = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
-  const rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 4_000_000 } : undefined);
+  const rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000 } : undefined);
   const chunks: Blob[] = [];
   rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   rec.start();

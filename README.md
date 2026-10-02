@@ -54,6 +54,18 @@ Phones save slow motion in two ways:
 
 Heights display in **cm or inches** (Setup, or the toggle on the result). They're always stored in cm.
 
+## Recording and dates
+
+- **Record now** uses the in-app camera. It picks the highest frame rate the camera offers at 720p or better (usually
+  60 fps in a browser) and records at a high bitrate, about 16 Mbps at 1080p60. The file picker's own "Take Video"
+  option records at medium quality, which websites can't change. For 240 fps, film in the phone's Slo-mo and choose the
+  video.
+- Timing uses each frame's real **timestamp**, interpolated for sub-frame marks, so the uneven frame timing of live
+  recordings doesn't skew the result.
+- **Jump date** comes from when the video was filmed: `com.apple.quicktime.creationdate`, the MP4 `mvhd` creation time,
+  or the file's date if it's clearly older than the upload. Live recordings use the recording time. You can always edit
+  it before saving, which keeps the progress chart accurate.
+
 ## Features
 
 - Frame-accurate stepping (`requestVideoFrameCallback`)

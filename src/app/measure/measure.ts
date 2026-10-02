@@ -29,6 +29,7 @@ import { clipStore, requestPersistentStorage } from '../core/clip-store';
 import { CloudService } from '../core/cloud.service';
 import { VaneGauge } from '../shared/vane-gauge';
 import { FootTrace } from '../shared/foot-trace';
+import { Recorder, Recording } from './recorder';
 
 export type MarkKey = 'start' | 'contact' | 'air' | 'ground';
 
@@ -58,7 +59,7 @@ const POWER_TYPES: JumpType[] = ['CMJ', 'CMJ + arms', 'Squat jump'];
 
 @Component({
   selector: 'app-measure',
-  imports: [FormsModule, DecimalPipe, RouterLink, VaneGauge, FootTrace, HeightPipe],
+  imports: [FormsModule, DecimalPipe, RouterLink, VaneGauge, FootTrace, HeightPipe, Recorder],
   templateUrl: './measure.html',
   styleUrl: './measure.scss',
 })
@@ -118,6 +119,15 @@ export class Measure implements OnDestroy {
   protected readonly elapsed = signal(0);
   private abort?: AbortController;
 
+  // Camera
+  protected readonly cameraOpen = signal(false);
+  protected readonly live = signal(false);
+
+  // When the jump happened (drives the progress chart), and where that came from.
+  protected readonly jumpDate = signal<string>(new Date().toISOString());
+  protected readonly dateSource = signal<'video' | 'file' | 'live' | 'unknown' | 'manual'>('unknown');
+  protected readonly jumpDateLocal = computed(() => toLocalInput(this.jumpDate()));
+
   // Save
   protected readonly note = signal('');
   protected readonly savedId = signal<string | null>(null);
@@ -160,7 +170,7 @@ export class Measure implements OnDestroy {
     const ground = this.at('ground');
     if (!fps || air === null || ground === null || ground <= air) return null;
     const frames = ground - air;
-    const flight = frames / fps;
+    const flight = this.realSeconds(air, ground);
     const heightCm = heightFromFlight(flight) * 100;
     const mass = this.store.settings().massKg;
 
@@ -169,7 +179,7 @@ export class Measure implements OnDestroy {
     let fctRatio: number | null = null;
     const contact = this.at('contact');
     if (this.isDrop() && contact !== null && air > contact) {
-      const ct = (air - contact) / fps;
+      const ct = this.realSeconds(contact, air);
       contactMs = ct * 1000;
       rsiValue = rsi(heightCm, ct);
       fctRatio = flight / ct;
@@ -179,7 +189,7 @@ export class Measure implements OnDestroy {
     let rsiModValue: number | null = null;
     const start = this.marks().start;
     if (!this.isDrop() && start !== null && air > start) {
-      const ttt = (air - start) / fps;
+      const ttt = this.realSeconds(start, air);
       tttMs = ttt * 1000;
       rsiModValue = rsiMod(heightCm, ttt);
     }
@@ -199,6 +209,20 @@ export class Measure implements OnDestroy {
       implausible: flight < 0.15 || flight > 1.1 || (contactMs !== null && (contactMs < 80 || contactMs > 1000)),
     };
   });
+
+  /**
+   * Real-world seconds between two (possibly fractional) frame positions. Uses the
+   * frames' own timestamps, so uneven timing in live recordings is handled, then scales
+   * file time to real time for slow-motion clips saved at normal speed.
+   */
+  private realSeconds(from: number, to: number): number {
+    const fps = this.realFps()!;
+    const fileFps = this.fileFps();
+    this.loaded(); // re-evaluate when a new video loads
+    if (!this.source || !fileFps) return (to - from) / fps;
+    const fileTime = this.source.timeAt(to) - this.source.timeAt(from);
+    return fileTime * (fileFps / fps);
+  }
 
   protected readonly best = computed(() => this.store.bestFor(this.type()));
 
@@ -232,18 +256,29 @@ export class Measure implements OnDestroy {
     const input = ev.target as HTMLInputElement;
     const file = input.files?.[0];
     input.value = '';
-    if (!file) return;
+    if (file) await this.loadFile(file);
+  }
+
+  onRecorded(r: Recording) {
+    this.cameraOpen.set(false);
+    this.loadFile(r.file, r);
+  }
+
+  private async loadFile(file: File, live?: Recording) {
     this.reset();
-    this.fileName.set(file.name);
+    this.fileName.set(live ? 'Camera recording' : file.name);
+    this.live.set(!!live);
     this.loading.set(true);
     try {
       const info = await readVideoInfo(file);
       this.info.set(info);
-      const source = await openFrameSource(file, info.containerFps);
+      this.setDetectedDate(file, info.recordedAt, live?.recordedAt);
+      const source = await openFrameSource(file, live?.fps ?? info.containerFps);
       this.source = source;
       this.engine.set(source.kind);
       this.totalFrames.set(source.frameCount);
-      const fileFps = info.containerFps ?? source.fps;
+      // Live recordings have uneven frame timing; the camera's rate is the honest figure.
+      const fileFps = live?.fps ?? info.containerFps ?? source.fps;
       this.fileFps.set(Math.round(fileFps * 100) / 100);
       if (info.captureFps && info.captureFps > fileFps * 1.05) {
         this.captureFps.set(info.captureFps);
@@ -276,6 +311,9 @@ export class Measure implements OnDestroy {
     this.fileFps.set(null);
     this.captureFps.set(null);
     this.fpsSource.set('file');
+    this.live.set(false);
+    this.jumpDate.set(new Date().toISOString());
+    this.dateSource.set('unknown');
     this.editingFps.set(false);
     this.checkAbort?.abort();
     this.fpsCheck.set({ state: 'idle' });
@@ -405,6 +443,32 @@ export class Measure implements OnDestroy {
       return rest;
     });
     if (this.method() === 'auto') this.method.set('auto-adjusted');
+  }
+
+  /** Date of the jump: when it was filmed if the video says so, else a best guess. */
+  private setDetectedDate(file: File, fromVideo: string | null, liveAt?: string) {
+    if (liveAt) {
+      this.jumpDate.set(liveAt);
+      this.dateSource.set('live');
+    } else if (fromVideo) {
+      this.jumpDate.set(fromVideo);
+      this.dateSource.set('video');
+    } else if (file.lastModified && file.lastModified < Date.now() - 10 * 60_000) {
+      // Phones often give picked videos a fresh timestamp, so only trust one that's clearly older.
+      this.jumpDate.set(new Date(file.lastModified).toISOString());
+      this.dateSource.set('file');
+    } else {
+      this.jumpDate.set(new Date().toISOString());
+      this.dateSource.set('unknown');
+    }
+  }
+
+  setJumpDate(local: string) {
+    const d = new Date(local);
+    if (isNaN(d.getTime())) return;
+    this.jumpDate.set(d.toISOString());
+    this.dateSource.set('manual');
+    this.savedId.set(null);
   }
 
   setCaptureFps(v: number | null) {
@@ -559,7 +623,7 @@ export class Measure implements OnDestroy {
     if (!r || !fps || this.orderError()) return;
     const round = (v: number | null, d = 1) => (v === null ? undefined : Math.round(v * 10 ** d) / 10 ** d);
     const rec = this.store.add({
-      date: new Date().toISOString(),
+      date: this.jumpDate(),
       heightCm: round(r.heightCm)!,
       flightMs: round(r.flightMs)!,
       captureFps: fps,
@@ -594,7 +658,7 @@ export class Measure implements OnDestroy {
     const u = this.units();
     const value = formatNumber(toUnits(heightCm, u), 1);
     const extra = rsiValue !== null ? `RSI ${rsiValue.toFixed(2)}, ` : rsiModValue !== null ? `RSI-mod ${rsiModValue.toFixed(2)}, ` : '';
-    const date = new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+    const date = new Date(this.jumpDate()).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
     this.clipError.set(null);
     this.clipProgress.set(0);
     try {
@@ -624,4 +688,11 @@ export class Measure implements OnDestroy {
     const span = p.stage === 'scanning' ? 73 : 25;
     return Math.round(base + (span * p.done) / Math.max(1, p.total));
   }
+}
+
+/** ISO → value for <input type="datetime-local"> in the user's time zone. */
+function toLocalInput(iso: string): string {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

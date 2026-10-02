@@ -17,6 +17,11 @@ export interface FrameSource {
   /** Upright display size. */
   readonly width: number;
   readonly height: number;
+  /**
+   * File time (seconds) of a frame, interpolated for fractional indices. Uses the real
+   * timestamps, so uneven frame timing (live recordings) is handled correctly.
+   */
+  timeAt(index: number): number;
   /** Draw frame `index` onto the canvas. Resolves false if a newer request superseded it. */
   show(index: number, canvas: HTMLCanvasElement): Promise<boolean>;
   /**
@@ -32,7 +37,9 @@ export interface FrameSource {
   dispose(): void;
 }
 
-const DISPLAY_MAX_SIDE = 960;
+const DISPLAY_MAX_SIDE = 1280;
+/** Memory budget for decoded frames kept for instant stepping. */
+const CACHE_BYTES = 280 * 1024 * 1024;
 
 export async function openFrameSource(file: File, hintFps: number | null): Promise<FrameSource> {
   if (typeof VideoDecoder !== 'undefined') {
@@ -135,6 +142,17 @@ class WebCodecsSource implements FrameSource {
     return new WebCodecsSource(file, samples, config, rotationOf(track.matrix), codedWidth, codedHeight);
   }
 
+  timeAt(index: number): number {
+    const n = this.frames.length;
+    if (!n) return 0;
+    const t0 = this.frames[0].timestampUs;
+    const at = (i: number) => (this.frames[Math.min(n - 1, Math.max(0, i))].timestampUs - t0) / 1e6;
+    if (index <= 0) return at(0) + index * (n > 1 ? at(1) - at(0) : 1 / this.fps);
+    if (index >= n - 1) return at(n - 1) + (index - (n - 1)) * (n > 1 ? at(n - 1) - at(n - 2) : 1 / this.fps);
+    const i = Math.floor(index);
+    return at(i) + (index - i) * (at(i + 1) - at(i));
+  }
+
   show(index: number, canvas: HTMLCanvasElement): Promise<boolean> {
     const ticket = ++this.latestShow;
     const run = async () => {
@@ -155,16 +173,19 @@ class WebCodecsSource implements FrameSource {
 
   /** Decode the GOP around `index` and cache nearby frames for instant stepping. */
   private async fillCache(index: number) {
-    const keep = (d: number) => Math.abs(d - index) <= 90;
+    const keep = (d: number) => Math.abs(d - index) <= 60;
     const targets = this.framesForGop(index).filter(keep);
     await this.decodeFrames(targets, DISPLAY_MAX_SIDE, (i, bmp) => {
       this.cache.set(i, bmp);
       return true; // keep the bitmap
     });
-    // Evict far-away frames to bound memory.
-    if (this.cache.size > 240) {
+    // Evict far-away frames to stay within the memory budget.
+    const any = this.cache.values().next().value as ImageBitmap | undefined;
+    const perFrame = any ? any.width * any.height * 4 : 1;
+    const maxFrames = Math.max(30, Math.floor(CACHE_BYTES / perFrame));
+    if (this.cache.size > maxFrames) {
       const far = [...this.cache.keys()].sort((a, b) => Math.abs(b - index) - Math.abs(a - index));
-      for (const k of far.slice(0, this.cache.size - 180)) {
+      for (const k of far.slice(0, this.cache.size - Math.floor(maxFrames * 0.75))) {
         this.cache.get(k)?.close();
         this.cache.delete(k);
       }
@@ -311,7 +332,10 @@ async function parseMovie(file: File): Promise<{ mp4: ISOFile; info: Movie }> {
 
   const CHUNK = 2 * 1024 * 1024;
   let pos = 0;
-  while (!info && !error && pos < file.size) {
+  // Fragmented MP4 (what in-browser recording produces) keeps its samples in moof boxes
+  // after the moov, so read the whole file in that case.
+  const done = () => !!info && !(info as Movie).isFragmented;
+  while (!done() && !error && pos < file.size) {
     const buf = MP4BoxBuffer.fromArrayBuffer(await file.slice(pos, pos + CHUNK).arrayBuffer(), pos);
     const next = mp4.appendBuffer(buf, pos + CHUNK >= file.size);
     pos = next > pos ? next : pos + CHUNK;
@@ -399,6 +423,10 @@ class VideoElementSource implements FrameSource {
     readonly fps: number,
     readonly frameCount: number,
   ) {}
+
+  timeAt(index: number): number {
+    return index / this.fps;
+  }
 
   get width() {
     return this.video.videoWidth;

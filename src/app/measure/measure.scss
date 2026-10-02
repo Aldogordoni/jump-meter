@@ -438,3 +438,14 @@
     accent-color: var(--blue);
   }
 }
+
+.start {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 20px 0 6px;
+  .pick {
+    margin: 0;
+  }
+}

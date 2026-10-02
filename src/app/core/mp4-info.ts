@@ -18,6 +18,8 @@ export interface VideoInfo {
   durationSec: number | null;
   width: number | null;
   height: number | null;
+  /** When the video was filmed (ISO), from the file's metadata, if present. */
+  recordedAt: string | null;
 }
 
 const EMPTY: VideoInfo = {
@@ -27,6 +29,7 @@ const EMPTY: VideoInfo = {
   durationSec: null,
   width: null,
   height: null,
+  recordedAt: null,
 };
 
 const CONTAINERS = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'udta', 'edts']);
@@ -151,7 +154,9 @@ export async function readVideoInfo(file: Blob): Promise<VideoInfo> {
       break;
     }
 
-    info.captureFps = findCaptureFps(view, moov);
+    const meta = readQuickTimeMeta(view, moov);
+    info.captureFps = captureFpsFrom(meta);
+    info.recordedAt = recordedAtFrom(meta) ?? mvhdCreation(view, moov);
     return info;
   } catch {
     return { ...EMPTY };
@@ -163,10 +168,12 @@ function round2(n: number) {
 }
 
 /**
- * QuickTime metadata (`meta` > `keys` + `ilst`). Android stores
- * `com.android.capture.fps` as a float, which is the real slow-mo rate.
+ * QuickTime metadata (`meta` > `keys` + `ilst`) as a key → value map. Phones put useful
+ * things here: Android's `com.android.capture.fps` (real slow-mo rate), and
+ * `com.apple.quicktime.creationdate` (local time the clip was filmed, with time zone).
  */
-function findCaptureFps(view: DataView, moov: Box): number | null {
+function readQuickTimeMeta(view: DataView, moov: Box): Map<string, string | number> {
+  const out = new Map<string, string | number>();
   const metas: Box[] = [];
   const walk = (box: Box) => {
     for (const c of children(view, box.start, box.end)) {
@@ -194,32 +201,61 @@ function findCaptureFps(view: DataView, moov: Box): number | null {
         names.push(name);
         p += size;
       }
-      const idx = names.findIndex(
-        (n) => n.includes('capture.fps') || ((n.includes('framerate') || n.includes('frame-rate')) && !n.includes('intent')),
-      );
-      if (idx < 0) continue;
 
       for (const item of children(view, ilst.start, ilst.end)) {
         const keyIndex = view.getUint32(item.start - 4); // the box "type" is the 1-based key index
-        if (keyIndex !== idx + 1) continue;
+        const name = names[keyIndex - 1];
+        if (!name) continue;
         const data = findChild(view, item, 'data');
         if (!data) continue;
         const kind = view.getUint32(data.start) & 0xffffff;
         const v = data.start + 8;
-        let value: number | null = null;
-        if (kind === 23) value = view.getFloat32(v);
-        else if (kind === 24) value = view.getFloat64(v);
-        else if (kind === 1) {
-          let s = '';
-          for (let j = v; j < data.end; j++) s += String.fromCharCode(view.getUint8(j));
-          value = parseFloat(s);
-        } else if (kind === 21 || kind === 22) {
+        if (kind === 23) out.set(name, view.getFloat32(v));
+        else if (kind === 24) out.set(name, view.getFloat64(v));
+        else if (kind === 1) out.set(name, new TextDecoder().decode(new Uint8Array(view.buffer, view.byteOffset + v, data.end - v)));
+        else if (kind === 21 || kind === 22) {
           const len = data.end - v;
-          value = len >= 4 ? view.getUint32(v) : len === 2 ? view.getUint16(v) : view.getUint8(v);
+          out.set(name, len >= 4 ? view.getUint32(v) : len === 2 ? view.getUint16(v) : view.getUint8(v));
         }
-        if (value && isFinite(value) && value > 0) return round2(value);
       }
+      if (out.size) return out;
     }
   }
+  return out;
+}
+
+function captureFpsFrom(meta: Map<string, string | number>): number | null {
+  for (const [name, raw] of meta) {
+    const isRate =
+      name.includes('capture.fps') || ((name.includes('framerate') || name.includes('frame-rate')) && !name.includes('intent'));
+    if (!isRate) continue;
+    const value = typeof raw === 'number' ? raw : parseFloat(raw);
+    if (value && isFinite(value) && value > 0) return round2(value);
+  }
   return null;
+}
+
+function recordedAtFrom(meta: Map<string, string | number>): string | null {
+  const raw = meta.get('com.apple.quicktime.creationdate') ?? meta.get('com.android.creationdate');
+  if (typeof raw !== 'string') return null;
+  // e.g. 2026-10-02T07:12:33+0100 → make the offset ISO-friendly.
+  const d = new Date(raw.trim().replace(/([+-]\d{2})(\d{2})$/, '$1:$2'));
+  return plausible(d) ? d.toISOString() : null;
+}
+
+/** Movie header creation time: seconds since 1904-01-01 UTC. Most cameras set it; some leave 0. */
+function mvhdCreation(view: DataView, moov: Box): string | null {
+  const mvhd = findChild(view, moov, 'mvhd');
+  if (!mvhd) return null;
+  const version = view.getUint8(mvhd.start);
+  const secs = version === 1 ? Number(view.getBigUint64(mvhd.start + 4)) : view.getUint32(mvhd.start + 4);
+  if (!secs) return null;
+  const d = new Date((secs - 2082844800) * 1000);
+  return plausible(d) ? d.toISOString() : null;
+}
+
+/** Ignore placeholder dates (1904/1970) and anything in the future. */
+function plausible(d: Date) {
+  const t = d.getTime();
+  return isFinite(t) && t > Date.UTC(2005, 0, 1) && t < Date.now() + 24 * 3600 * 1000;
 }

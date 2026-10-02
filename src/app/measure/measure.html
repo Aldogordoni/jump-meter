@@ -5,21 +5,33 @@
       Load a slow-motion video of your jump. The app times how long you're in the air and turns that into height.
     </p>
 
-    <label class="pick">
-      <input type="file" accept="video/*" (change)="onFile($event)" [disabled]="loading()" />
-      <span class="btn primary big">{{ loading() ? 'Opening video…' : 'Choose a video' }}</span>
-      <span class="muted small">Stays on your phone. Nothing is uploaded.</span>
-    </label>
+    @if (cameraOpen()) {
+      <app-recorder (recorded)="onRecorded($event)" (cancelled)="cameraOpen.set(false)" />
+    } @else {
+      <div class="start">
+        <label class="pick">
+          <input type="file" accept="video/*" (change)="onFile($event)" [disabled]="loading()" />
+          <span class="btn primary big">{{ loading() ? 'Opening video…' : 'Choose a video' }}</span>
+        </label>
+        <button class="btn big" type="button" (click)="cameraOpen.set(true)" [disabled]="loading()">Record now</button>
+      </div>
+      <p class="muted small">
+        Best accuracy: film in your camera app's Slo-mo, then choose the video. "Record now" uses the best quality your
+        browser allows, usually 60 fps.
+      </p>
+    }
     @if (loadError()) {
       <p class="error" role="alert">{{ loadError() }}</p>
     }
 
+    @if (!cameraOpen()) {
     <ol class="steps">
       <li><strong>Slow-mo, 240 fps</strong> if your phone has it. 120 is fine, 30 is too coarse.</li>
       <li><strong>Phone on the floor</strong>, side-on, about 2 m away, with your feet clearly in frame.</li>
       <li><strong>Land the way you took off</strong>: straight legs, toes pointed. Tucking your knees adds fake centimetres.</li>
     </ol>
     <p class="muted small">More detail in <a routerLink="/setup">Setup</a>.</p>
+    }
   </section>
 } @else {
   <section class="player">
@@ -72,7 +84,7 @@
         <strong class="num rate">{{ realFps() }} fps</strong>
         <span class="src">
           @switch (fpsSource()) {
-            @case ('file') { from the video file }
+            @case ('file') { {{ live() ? 'from the camera' : 'from the video file' }} }
             @case ('metadata') { slow-motion rate saved in the file }
             @case ('motion') { worked out from your jump }
             @case ('manual') { set by you }
@@ -312,6 +324,19 @@
         }
 
         <div class="save">
+          <div class="field">
+            <label for="jdate">Date of the jump</label>
+            <input id="jdate" type="datetime-local" [ngModel]="jumpDateLocal()" (ngModelChange)="setJumpDate($event)" />
+            <span class="hint">
+              @switch (dateSource()) {
+                @case ('video') { From the video: when it was filmed. }
+                @case ('live') { Recorded just now. }
+                @case ('file') { From the file's date. Check it's right. }
+                @case ('manual') { Set by you. }
+                @default { The video doesn't say when it was filmed, so set the date for an accurate progress chart. }
+              }
+            </span>
+          </div>
           <div class="field">
             <label for="note">Note</label>
             <input id="note" type="text" [ngModel]="note()" (ngModelChange)="note.set($event)" placeholder="e.g. after warm-up, trainers" />
