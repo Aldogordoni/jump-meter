@@ -1,12 +1,13 @@
 import { Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { RouterLink } from '@angular/router';
 import { StoreService } from '../core/store.service';
 import { JUMP_TYPES, fromUnits, toUnits } from '../core/jump-math';
 import { requestPersistentStorage } from '../core/clip-store';
 
 @Component({
   selector: 'app-setup',
-  imports: [FormsModule],
+  imports: [FormsModule, RouterLink],
   template: `
     <h1>Setup</h1>
 
@@ -125,13 +126,14 @@ import { requestPersistentStorage } from '../core/clip-store';
     <section>
       <h2>Your data</h2>
       <p>
-        Everything stays on this phone, in this browser: your jumps, your details and the video clips. Nothing is uploaded,
-        there's no account, and the app has no server to send anything to. Videos you open are read locally and never
-        leave the device.
+        Your jumps, details and clips are always saved on this phone first, so the app works offline. If you
+        <a routerLink="/account">sign in</a>, they're also kept in the cloud as a long-term record: a private database in
+        the EU that only you can read. Accounts are invite-only. Videos are only uploaded as the short clips you choose to
+        save, never the original recording.
       </p>
       <p>
-        The flip side: if you clear this browser's data or uninstall the app, your history goes with it. Export a backup
-        now and then (video clips aren't included, download the ones you want to keep from History).
+        Without signing in, clearing this browser's data or losing the phone loses your history, so export a backup now
+        and then.
         @if (persisted() === false) {
           <strong>On iPhone, add the app to your home screen.</strong> Safari can otherwise delete data for sites you
           haven't opened in 7 days.

@@ -319,7 +319,7 @@
           @if (!savedId()) {
             <label class="check-row">
               <input type="checkbox" [ngModel]="saveClip()" (ngModelChange)="saveClip.set($event)" />
-              Save a video clip of the jump (stays on this phone)
+              Save a video clip of the jump{{ cloud.signedIn() ? ' (backed up to your account)' : ' (kept on this phone)' }}
             </label>
           }
           @if (savedId()) {

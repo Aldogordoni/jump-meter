@@ -102,4 +102,8 @@ export interface JumpRecord {
   timeToTakeoffMs?: number;
   /** RSI-modified = height (m) / time to take-off (s). */
   rsiMod?: number;
+  /** Local bookkeeping: saved to the cloud. */
+  synced?: boolean;
+  /** The cloud has a video clip for this jump. */
+  hasClip?: boolean;
 }

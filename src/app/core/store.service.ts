@@ -35,6 +35,17 @@ function loadArray<T>(key: string): T[] {
   }
 }
 
+export function uuid(): string {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+export const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+
 function save(key: string, value: unknown) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
@@ -57,9 +68,33 @@ export class StoreService {
   }
 
   add(record: Omit<JumpRecord, 'id'>): JumpRecord {
-    const full: JumpRecord = { ...record, id: crypto.randomUUID?.() ?? String(Date.now()) };
+    const full: JumpRecord = { ...record, id: uuid(), synced: false };
     this.history.update((h) => [...h, full]);
+    this.listeners.forEach((l) => l({ kind: 'add', record: full }));
     return full;
+  }
+
+  /** Change listeners (the cloud sync subscribes here). */
+  private readonly listeners: ((e: { kind: 'add' | 'restore'; record: JumpRecord }) => void)[] = [];
+  onChange(fn: (e: { kind: 'add' | 'restore'; record: JumpRecord }) => void) {
+    this.listeners.push(fn);
+  }
+
+  /** Replace or insert records by id (used by sync). */
+  upsertMany(records: JumpRecord[]) {
+    if (!records.length) return;
+    const byId = new Map(this.history().map((r) => [r.id, r]));
+    for (const r of records) byId.set(r.id, { ...byId.get(r.id), ...r });
+    this.history.set([...byId.values()]);
+  }
+
+  removeIds(ids: Iterable<string>) {
+    const drop = new Set(ids);
+    if (drop.size) this.history.update((h) => h.filter((r) => !drop.has(r.id)));
+  }
+
+  patch(id: string, patch: Partial<JumpRecord>) {
+    this.history.update((h) => h.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   }
 
   remove(id: string) {
@@ -68,6 +103,7 @@ export class StoreService {
 
   restore(record: JumpRecord) {
     this.history.update((h) => [...h, record]);
+    this.listeners.forEach((l) => l({ kind: 'restore', record }));
   }
 
   updateSettings(patch: Partial<Settings>) {
@@ -93,7 +129,7 @@ export class StoreService {
     const fresh = incoming.filter(
       (r) => r && typeof r.heightCm === 'number' && typeof r.date === 'string' && !known.has(r.id),
     );
-    this.history.update((h) => [...h, ...fresh]);
+    this.history.update((h) => [...h, ...fresh.map((r) => ({ ...r, synced: false, hasClip: false }))]);
     return fresh.length;
   }
 }

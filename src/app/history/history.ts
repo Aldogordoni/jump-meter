@@ -6,6 +6,7 @@ import { JUMP_TYPES, JumpRecord, JumpType, toUnits } from '../core/jump-math';
 import { HeightPipe, formatNumber } from '../core/height.pipe';
 import { ChartPoint, ProgressChart } from '../shared/progress-chart';
 import { clipStore, StoredClip } from '../core/clip-store';
+import { CloudService } from '../core/cloud.service';
 
 type MetricKey = 'height' | 'rsi' | 'contact' | 'rsiMod' | 'ttt';
 
@@ -116,12 +117,12 @@ interface Metric {
               @if (r.note) {
                 <span class="note">{{ r.note }}</span>
               }
-              @if (clipIds().has(r.id)) {
-                <button class="thumb" type="button" (click)="openClip(r)">
+              @if (clipIds().has(r.id) || r.hasClip) {
+                <button class="thumb" type="button" (click)="openClip(r)" [disabled]="opening() === r.id">
                   @if (posters()[r.id]; as src) {
                     <img [src]="src" alt="" />
                   }
-                  <span>Watch clip</span>
+                  <span>{{ opening() === r.id ? 'Downloading clip…' : 'Watch clip' }}</span>
                 </button>
               }
             </div>
@@ -350,6 +351,9 @@ interface Metric {
 })
 export class History implements OnDestroy {
   protected readonly store = inject(StoreService);
+  private readonly cloud = inject(CloudService);
+  protected readonly opening = signal<string | null>(null);
+  private readonly posterRequested = new Set<string>();
   protected readonly clipIds = signal<Set<string>>(new Set());
   protected readonly posters = signal<Record<string, string>>({});
   protected readonly viewing = signal<{ url: string; fileName: string; clip: StoredClip } | null>(null);
@@ -362,11 +366,25 @@ export class History implements OnDestroy {
     effect(() => {
       const ids = this.clipIds();
       const have = this.posters();
+      const remote: string[] = [];
       for (const r of this.filtered()) {
-        if (!ids.has(r.id) || have[r.id]) continue;
-        clipStore.get(r.id).then((c) => {
-          if (c) this.posters.update((p) => ({ ...p, [r.id]: URL.createObjectURL(c.poster) }));
-        });
+        if (have[r.id] || this.posterRequested.has(r.id)) continue;
+        if (ids.has(r.id)) {
+          this.posterRequested.add(r.id);
+          clipStore.get(r.id).then((c) => {
+            if (c && c.poster.size) this.posters.update((p) => ({ ...p, [r.id]: URL.createObjectURL(c.poster) }));
+          });
+        } else if (r.hasClip && this.cloud.signedIn()) {
+          this.posterRequested.add(r.id);
+          remote.push(r.id);
+        }
+      }
+      // Clips saved from another device: thumbnails come from the cloud.
+      if (remote.length) {
+        this.cloud
+          .posterUrls(remote)
+          .then((urls) => this.posters.update((p) => ({ ...p, ...urls })))
+          .catch(() => undefined);
       }
     });
   }
@@ -385,7 +403,16 @@ export class History implements OnDestroy {
   }
 
   protected async openClip(r: JumpRecord) {
-    const clip = await clipStore.get(r.id);
+    let clip = await clipStore.get(r.id).catch(() => undefined);
+    if (!clip && r.hasClip) {
+      this.opening.set(r.id);
+      try {
+        clip = await this.cloud.fetchClip(r.id);
+        if (clip) this.clipIds.update((s) => new Set(s).add(r.id));
+      } finally {
+        this.opening.set(null);
+      }
+    }
     if (!clip) return;
     const ext = clip.mime.includes('mp4') ? 'mp4' : 'webm';
     const name = `jump-${r.date.slice(0, 10)}-${r.type.replace(/\W+/g, '-').toLowerCase()}-${r.heightCm}cm.${ext}`;
@@ -493,6 +520,7 @@ export class History implements OnDestroy {
     this.flushClipDeletes();
     this.store.remove(r.id);
     this.pendingClipDeletes.add(r.id);
+    if (r.synced) this.cloud.deleteJump(r.id);
     this.undo.set(r);
     clearTimeout(this.undoTimer);
     this.undoTimer = setTimeout(() => {
@@ -506,6 +534,7 @@ export class History implements OnDestroy {
     if (r) {
       this.store.restore(r);
       this.pendingClipDeletes.delete(r.id);
+      this.cloud.cancelDelete(r.id);
     }
     this.undo.set(null);
   }

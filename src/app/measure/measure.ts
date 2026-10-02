@@ -26,6 +26,7 @@ import { estimateFps, reconcileFps } from '../core/fps-infer';
 import { HeightPipe, formatNumber } from '../core/height.pipe';
 import { makeClip } from '../core/clip-maker';
 import { clipStore, requestPersistentStorage } from '../core/clip-store';
+import { CloudService } from '../core/cloud.service';
 import { VaneGauge } from '../shared/vane-gauge';
 import { FootTrace } from '../shared/foot-trace';
 
@@ -63,6 +64,7 @@ const POWER_TYPES: JumpType[] = ['CMJ', 'CMJ + arms', 'Squat jump'];
 })
 export class Measure implements OnDestroy {
   protected readonly store = inject(StoreService);
+  protected readonly cloud = inject(CloudService);
   private readonly pose = inject(PoseDetectorService);
 
   protected readonly canvasRef = viewChild<ElementRef<HTMLCanvasElement>>('frame');
@@ -605,6 +607,7 @@ export class Measure implements OnDestroy {
         onProgress: (f) => this.clipProgress.set(Math.round(f * 100)),
       });
       await clipStore.put({ id, ...clip, createdAt: new Date().toISOString() });
+      this.cloud.schedule(0);
     } catch (e) {
       console.error(e);
       this.clipError.set("The jump is saved, but the video clip couldn't be made on this browser.");

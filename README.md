@@ -64,12 +64,31 @@ Heights display in **cm or inches** (Setup, or the toggle on the result). They'r
 - Saves a short slow-motion **video clip** of each jump (key frames labelled, result captioned) to view, download or share
 - Installable PWA that works offline after first use
 
-## Privacy
+## Cloud sync and privacy
 
-There is no account and no backend. Jump history and settings live in `localStorage`, and clips in IndexedDB, all on the
-device. Videos are decoded locally and never uploaded. A Content Security Policy only allows code from the app's
-own origin, and only allows network requests to that origin plus Google's model server, as a fallback for the pose model.
-The app asks for persistent storage so the browser doesn't evict data. Export a JSON backup from Setup.
+The phone is always the working copy: everything works offline, in `localStorage` with clips in IndexedDB. Signing in
+adds a long-term cloud copy in **Supabase** (EU region).
+
+- **Invite-only.** Only emails in `public.allowed_emails` can create an account: a trigger on `auth.users` rejects
+  everyone else. Every table and the clips bucket also check the list on each request with row-level security, so
+  removing an email cuts off access immediately. Admins manage the list in the app under **Account → Manage approved
+  emails**.
+- **Own data only.** Row-level security limits every row and file to its owner (`clips/<user id>/…`).
+- **Passwordless.** Users sign in with a 6-digit code sent by email.
+- **Deletable.** Users can delete all their cloud data from the Account page.
+- The page's Content Security Policy only allows network requests to the app itself, Supabase, and Google's model CDN.
+
+### Supabase setup
+
+1. Apply `supabase/migrations/0001_init.sql` (already applied to the `jump-meter` project). Optionally also apply
+   `0002_delete_my_account.sql`, so users can delete their own login and not just their data.
+2. **Authentication → Email Templates**: in both **Magic Link** and **Confirm signup**, put the code in the email:
+   `<h2>Your Jump Meter code</h2><p>Enter this code in the app: <strong>{{ .Token }}</strong></p>`
+3. **Authentication → URL Configuration**: set Site URL to `https://aldogordoni.github.io/jump-meter/`.
+4. Put the project URL and publishable key in `src/app/core/cloud.config.ts`. Both are public by design.
+
+Supabase's built-in email sender only allows a few emails per hour. For more than a handful of users, add your own SMTP
+under Authentication → SMTP Settings.
 
 ## Development
 

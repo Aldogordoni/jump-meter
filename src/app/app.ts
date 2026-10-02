@@ -1,6 +1,7 @@
 import { Component, inject } from '@angular/core';
 import { SwUpdate } from '@angular/service-worker';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { CloudService } from './core/cloud.service';
 
 @Component({
   selector: 'app-root',
@@ -16,6 +17,16 @@ import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
         </svg>
         Jump Meter
       </a>
+      @if (cloud.configured) {
+        <a routerLink="/account" class="acct" [class]="'acct ' + cloud.status()" [attr.aria-label]="accountLabel()">
+          @if (cloud.user(); as u) {
+            <span class="dot" aria-hidden="true"></span>
+            <span class="initial">{{ u.email.charAt(0).toUpperCase() }}</span>
+          } @else {
+            Sign in
+          }
+        </a>
+      }
     </header>
     <main>
       <router-outlet />
@@ -36,6 +47,43 @@ import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
       padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
       max-width: 760px;
       margin: 0 auto;
+    }
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .acct {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 40px;
+      padding: 0 12px;
+      border: 1.5px solid var(--line);
+      border-radius: 999px;
+      color: var(--ink);
+      text-decoration: none;
+      font-weight: 600;
+      .initial {
+        font-family: var(--display);
+        font-size: 1.1rem;
+      }
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--ink-soft);
+      }
+      &.idle .dot {
+        background: var(--ok);
+      }
+      &.syncing .dot {
+        background: var(--blue);
+      }
+      &.error .dot,
+      &.offline .dot {
+        background: var(--red);
+      }
     }
     .mark {
       display: inline-flex;
@@ -81,7 +129,16 @@ import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
   `,
 })
 export class App {
+  protected readonly cloud = inject(CloudService);
+  protected accountLabel() {
+    const u = this.cloud.user();
+    if (!u) return 'Sign in to sync your jumps';
+    const s = this.cloud.status();
+    return `Account: ${u.email}, ${s === 'idle' ? 'synced' : s}`;
+  }
+
   constructor() {
+    this.cloud.init().catch((e) => console.warn('[jump-meter] cloud init failed', e));
     // Apply new versions straight away, so fixes reach the installed app without a double refresh.
     const sw = inject(SwUpdate);
     if (sw.isEnabled) {
