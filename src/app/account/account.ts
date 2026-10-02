@@ -20,6 +20,9 @@ import { StoreService } from '../core/store.service';
           Sign in to keep your jumps, settings and video clips in the cloud, so they survive a lost phone and show up on
           all your devices. Accounts are invite-only: only emails approved by the admin can sign in.
         </p>
+        @if (cloud.linkError()) {
+          <p class="error" role="alert">{{ cloud.linkError() }}</p>
+        }
         @if (step() === 'email') {
           <form (ngSubmit)="send()">
             <div class="field">
@@ -30,7 +33,10 @@ import { StoreService } from '../core/store.service';
           </form>
         } @else {
           <form (ngSubmit)="verify()">
-            <p>We sent a 6-digit code to <strong>{{ email }}</strong>. It may take a minute, so check spam too.</p>
+            <p>
+              We emailed <strong>{{ email }}</strong>. Type the 6-digit code here, or tap the link in the email. It may
+              take a minute, so check spam too.
+            </p>
             <div class="field">
               <label for="code">Code</label>
               <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="10" required [(ngModel)]="code" />

@@ -82,6 +82,7 @@ export class CloudService {
   async init() {
     if (!this.configured) return;
     const sb = await this.sb();
+    await this.consumeAuthRedirect(sb);
     const { data } = await sb.auth.getSession();
     if (data.session?.user) await this.onSignedIn(data.session.user);
     else this.status.set('off');
@@ -93,6 +94,33 @@ export class CloudService {
       }
     });
   }
+
+  /** Finish a sign-in that arrived through an email link (tokens stashed by main.ts). */
+  private async consumeAuthRedirect(sb: SupabaseClient) {
+    let raw: string | null = null;
+    try {
+      raw = sessionStorage.getItem('jump-meter.auth-redirect');
+      sessionStorage.removeItem('jump-meter.auth-redirect');
+    } catch {
+      return;
+    }
+    if (!raw) return;
+    const p = new URLSearchParams(raw);
+    const err = p.get('error_description');
+    if (err) {
+      this.linkError.set(/expired|invalid/i.test(err) ? 'That sign-in link has expired or was already used. Request a new code.' : err);
+      return;
+    }
+    const access_token = p.get('access_token');
+    const refresh_token = p.get('refresh_token');
+    if (access_token && refresh_token) {
+      const { error } = await sb.auth.setSession({ access_token, refresh_token });
+      if (error) this.linkError.set(friendlyAuthError(error.message));
+    }
+  }
+
+  /** Error from a sign-in link, shown on the Account page. */
+  readonly linkError = signal<string | null>(null);
 
   private sb(): Promise<SupabaseClient> {
     this.client ??= import('@supabase/supabase-js').then(({ createClient }) =>
@@ -111,7 +139,8 @@ export class CloudService {
     const sb = await this.sb();
     const { error } = await sb.auth.signInWithOtp({
       email: normaliseEmail(email),
-      options: { shouldCreateUser: true },
+      // If the email contains a link rather than a code, bring the user back to this app.
+      options: { shouldCreateUser: true, emailRedirectTo: appUrl() },
     });
     if (error) throw new Error(friendlyAuthError(error.message));
   }
@@ -484,6 +513,10 @@ function fromRow(r: JumpRow): JumpRecord {
     rsiMod: opt(r.rsi_mod),
     hasClip: r.has_clip,
   };
+}
+
+function appUrl() {
+  return new URL('.', document.baseURI).href;
 }
 
 function normaliseEmail(e: string) {
