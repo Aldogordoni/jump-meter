@@ -97,6 +97,13 @@ export class StoreService {
     this.history.update((h) => h.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   }
 
+  /** User edit: change a jump's date and queue it for upload. */
+  setDate(id: string, iso: string) {
+    this.patch(id, { date: iso, synced: false });
+    const r = this.history().find((x) => x.id === id);
+    if (r) this.listeners.forEach((l) => l({ kind: 'restore', record: r }));
+  }
+
   remove(id: string) {
     this.history.update((h) => h.filter((r) => r.id !== id));
   }

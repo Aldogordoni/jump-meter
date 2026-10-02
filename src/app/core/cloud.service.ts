@@ -283,7 +283,10 @@ export class CloudService {
     for (const local of this.store.history()) {
       if (this.deletes.has(local.id)) continue;
       const row = remote.get(local.id);
-      if (row) {
+      if (row && !local.synced) {
+        toUpload.push(local); // edited on this phone (e.g. date corrected): local copy wins
+        remote.delete(local.id);
+      } else if (row) {
         toUpsert.push({ ...fromRow(row), synced: true });
         remote.delete(local.id);
       } else if (local.synced) {
@@ -311,7 +314,7 @@ export class CloudService {
     if (toUpload.length) {
       const { error } = await sb.from('jumps').upsert(toUpload.map(toRow));
       if (error) throw error;
-      toUpsert.push(...toUpload.map((r) => ({ ...r, synced: true, hasClip: false })));
+      toUpsert.push(...toUpload.map((r) => ({ ...r, synced: true, hasClip: r.hasClip ?? false })));
     }
     this.store.removeIds(toRemove);
     toRemove.forEach((id) => clipStore.delete(id).catch(() => undefined));

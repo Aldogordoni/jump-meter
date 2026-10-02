@@ -449,3 +449,14 @@
     margin: 0;
   }
 }
+
+.date-field.attention {
+  padding: 10px 12px;
+  border-left: 4px solid var(--blue);
+  background: var(--surface);
+  border-radius: var(--r-sm);
+  .hint {
+    color: var(--ink);
+    font-weight: 600;
+  }
+}

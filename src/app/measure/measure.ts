@@ -125,7 +125,9 @@ export class Measure implements OnDestroy {
 
   // When the jump happened (drives the progress chart), and where that came from.
   protected readonly jumpDate = signal<string>(new Date().toISOString());
-  protected readonly dateSource = signal<'video' | 'file' | 'live' | 'unknown' | 'manual'>('unknown');
+  protected readonly dateSource = signal<'video' | 'file' | 'live' | 'unknown' | 'resaved' | 'manual'>('unknown');
+  /** The date needs the user's attention before saving. */
+  protected readonly dateUncertain = computed(() => this.dateSource() === 'unknown' || this.dateSource() === 'resaved');
   protected readonly jumpDateLocal = computed(() => toLocalInput(this.jumpDate()));
 
   // Save
@@ -450,10 +452,15 @@ export class Measure implements OnDestroy {
     if (liveAt) {
       this.jumpDate.set(liveAt);
       this.dateSource.set('live');
-    } else if (fromVideo) {
+    } else if (fromVideo && !isJustNow(fromVideo)) {
       this.jumpDate.set(fromVideo);
       this.dateSource.set('video');
-    } else if (file.lastModified && file.lastModified < Date.now() - 10 * 60_000) {
+    } else if (fromVideo) {
+      // iPhone re-saves videos picked from Photos and stamps the copy with the current time,
+      // so a "filmed" time of just now really means the real date was lost.
+      this.jumpDate.set(new Date().toISOString());
+      this.dateSource.set('resaved');
+    } else if (file.lastModified && !isJustNow(new Date(file.lastModified).toISOString())) {
       // Phones often give picked videos a fresh timestamp, so only trust one that's clearly older.
       this.jumpDate.set(new Date(file.lastModified).toISOString());
       this.dateSource.set('file');
@@ -695,4 +702,9 @@ function toLocalInput(iso: string): string {
   const d = new Date(iso);
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** Within 15 minutes of now: a timestamp from re-saving the file, not from filming. */
+function isJustNow(iso: string): boolean {
+  return Math.abs(Date.now() - new Date(iso).getTime()) < 15 * 60_000;
 }

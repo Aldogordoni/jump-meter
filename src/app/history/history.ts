@@ -104,7 +104,22 @@ interface Metric {
           <li>
             <div class="h num">{{ r.heightCm | height: 'value' }} <small>{{ units() }}</small></div>
             <div class="meta">
-              <span>{{ r.date | date: 'EEE d MMM yyyy, HH:mm' }}</span>
+              @if (editingDate() === r.id) {
+                <span class="date-edit">
+                  <input
+                    type="datetime-local"
+                    [value]="toLocal(r.date)"
+                    (change)="saveDate(r, $any($event.target).value)"
+                    [attr.aria-label]="'Date of the ' + r.type"
+                  />
+                  <button class="btn ghost" type="button" (click)="editingDate.set(null)">Done</button>
+                </span>
+              } @else {
+                <span>
+                  {{ r.date | date: 'EEE d MMM yyyy, HH:mm' }}
+                  <button class="link" type="button" (click)="editingDate.set(r.id)">Edit date</button>
+                </span>
+              }
               @if (r.rsi !== undefined) {
                 <span class="stat">RSI {{ r.rsi | number: '1.2-2' }}, contact {{ r.contactMs | number: '1.0-0' }} ms@if (r.boxCm) {, {{ r.boxCm | height: 'full' : 0 }} box}</span>
               }
@@ -274,6 +289,29 @@ interface Metric {
       .del {
         color: var(--red);
         padding-inline: 0.6em;
+      }
+    }
+    .link {
+      border: 0;
+      background: none;
+      padding: 0 0 0 6px;
+      color: var(--blue);
+      font: inherit;
+      font-size: 0.82rem;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    .date-edit {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      input {
+        min-height: 40px;
+        padding: 0 8px;
+        border: 1.5px solid var(--line);
+        border-radius: var(--r-sm);
+        background: var(--surface);
+        max-width: 100%;
       }
     }
     .thumb {
@@ -511,6 +549,21 @@ export class History implements OnDestroy {
         return { id: r.id, date: r.date, value, text, note: r.note };
       });
   });
+
+  protected readonly editingDate = signal<string | null>(null);
+
+  protected toLocal(iso: string) {
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  protected saveDate(r: JumpRecord, local: string) {
+    const d = new Date(local);
+    if (isNaN(d.getTime())) return;
+    this.store.setDate(r.id, d.toISOString());
+    this.editingDate.set(null);
+  }
 
   protected methodLabel(r: JumpRecord) {
     return r.method === 'manual' ? 'marked by hand' : r.method === 'auto' ? 'auto-detected' : 'auto, adjusted';

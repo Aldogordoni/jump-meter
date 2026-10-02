@@ -324,7 +324,7 @@
         }
 
         <div class="save">
-          <div class="field">
+          <div class="field date-field" [class.attention]="dateUncertain()">
             <label for="jdate">Date of the jump</label>
             <input id="jdate" type="datetime-local" [ngModel]="jumpDateLocal()" (ngModelChange)="setJumpDate($event)" />
             <span class="hint">
@@ -333,7 +333,8 @@
                 @case ('live') { Recorded just now. }
                 @case ('file') { From the file's date. Check it's right. }
                 @case ('manual') { Set by you. }
-                @default { The video doesn't say when it was filmed, so set the date for an accurate progress chart. }
+                @case ('resaved') { Your phone re-saved this video when you picked it, so the filming date was lost. Set the day you jumped. }
+                @default { The video doesn't say when it was filmed. Set the day you jumped so your progress chart is right. }
               }
             </span>
           </div>
