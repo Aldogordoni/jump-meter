@@ -1,7 +1,8 @@
 import { Injectable } from '@angular/core';
 import type { PoseLandmarker } from '@mediapipe/tasks-vision';
-import { coarseLocate, DetectionError, DetectMode, findMovementStart, FlightEstimate, FootSample, refineFlight } from './flight-detect';
+import { coarseLocate, DetectionError, DetectMode, findMovementStart, FlightEstimate, FootSample, Joint, refineFlight } from './flight-detect';
 import { FrameSource } from './frame-source';
+import { coarseHops, findHops, type HopEvent } from './pose-analysis';
 
 const REMOTE_MODEL =
   'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task';
@@ -141,14 +142,7 @@ export class PoseDetectorService {
         }
       }
 
-      let s: FootSample = { frame, footY: NaN, legLen: NaN };
-      if (lm) {
-        const footY = Math.max(...FOOT_POINTS.map((i) => lm[i].y));
-        const hipY = (lm[L_HIP].y + lm[R_HIP].y) / 2;
-        const ankleY = (lm[L_ANKLE].y + lm[R_ANKLE].y) / 2;
-        s = { frame, footY, legLen: ankleY - hipY, hipY, noseY: lm[0].y, heelY: Math.max(lm[29].y, lm[30].y) };
-      }
-      cache.set(frame, s);
+      cache.set(frame, toSample(frame, lm));
     };
 
     // Pass 1: sparse scan – about every 30 ms of real time, capped for long clips.
@@ -208,6 +202,56 @@ export class PoseDetectorService {
     return { ...estimate, trace };
   }
 
+  /**
+   * Repeated jumps: sparse scan of the whole clip, then every frame around each take-off
+   * and landing, then all flights from the combined trace.
+   */
+  async detectHops(
+    source: FrameSource,
+    realFps: number,
+    onProgress: (p: DetectProgress) => void,
+    signal?: AbortSignal,
+  ): Promise<{ trace: FootSample[]; events: HopEvent[]; floor: number }> {
+    onProgress({ stage: 'loading', done: 0, total: 1 });
+    let model: PoseLandmarker;
+    try {
+      ({ model } = await this.loadAny());
+    } catch {
+      throw new DetectionError("Couldn't load the pose model. Check your connection and try again.");
+    }
+    const total = source.frameCount;
+    const cache = new Map<number, FootSample>();
+    const run = async (frames: number[], stage: DetectProgress['stage']) => {
+      let done = 0;
+      await source.scan(
+        frames,
+        POSE_MAX_SIDE,
+        async (i, img) => {
+          cache.set(i, toSample(i, model.detect(img).landmarks[0]));
+          onProgress({ stage, done: ++done, total: frames.length });
+          await yieldToUi(done);
+        },
+        signal,
+      );
+    };
+    // Hops are short, so scan a little finer than for a single jump.
+    const step = Math.max(1, Math.round(realFps * 0.025), Math.ceil(total / 300));
+    const sparse: number[] = [];
+    for (let f = 0; f < total; f += step) sparse.push(f);
+    await run(sparse, 'scanning');
+    const coarse = coarseHops(sparse.map((f) => cache.get(f)!).filter(Boolean));
+    if (!coarse) throw new DetectionError("Couldn't find repeated hops. Film side-on with your feet clearly in shot.");
+    const dense = new Set<number>();
+    for (const t of coarse.transitions) {
+      for (let f = Math.max(0, t.from - 2); f <= Math.min(total - 1, t.to + 2); f++) if (!cache.has(f)) dense.add(f);
+    }
+    await run([...dense].sort((a, b) => a - b), 'refining');
+    const trace = [...cache.values()].filter((s) => isFinite(s.footY)).sort((a, b) => a.frame - b.frame);
+    const events = findHops(trace, coarse.floor, coarse.threshold);
+    if (events.length < 2) throw new DetectionError('Found fewer than two hops. Keep recording until the last landing.');
+    return { trace, events, floor: coarse.floor };
+  }
+
   /** Run the pose model on specific frames (used for the frame-rate check after manual marking). */
   async samplePoses(source: FrameSource, frames: number[], signal?: AbortSignal): Promise<FootSample[]> {
     const { model } = await this.loadAny();
@@ -226,12 +270,21 @@ export class PoseDetectorService {
 }
 
 /** Turn MediaPipe landmarks into the measurements we use. */
-export function toSample(frame: number, lm: { x: number; y: number }[] | undefined): FootSample {
+const JOINTS: Record<Joint, number> = {
+  shoulderL: 11, shoulderR: 12, wristL: 15, wristR: 16, hipL: 23, hipR: 24, kneeL: 25, kneeR: 26,
+  ankleL: 27, ankleR: 28, heelL: 29, heelR: 30, toeL: 31, toeR: 32,
+};
+
+export function toSample(frame: number, lm: { x: number; y: number; visibility?: number }[] | undefined): FootSample {
   if (!lm) return { frame, footY: NaN, legLen: NaN };
   const footY = Math.max(...FOOT_POINTS.map((i) => lm[i].y));
   const hipY = (lm[L_HIP].y + lm[R_HIP].y) / 2;
   const ankleY = (lm[L_ANKLE].y + lm[R_ANKLE].y) / 2;
-  return { frame, footY, legLen: ankleY - hipY, hipY, noseY: lm[0].y, heelY: Math.max(lm[29].y, lm[30].y) };
+  const pts: FootSample['pts'] = {};
+  for (const [name, i] of Object.entries(JOINTS) as [Joint, number][]) {
+    pts[name] = [lm[i].x, lm[i].y, lm[i].visibility ?? 1];
+  }
+  return { frame, footY, legLen: ankleY - hipY, hipY, noseY: lm[0].y, heelY: Math.max(lm[29].y, lm[30].y), pts };
 }
 
 /** Let the progress bar repaint every few frames. */

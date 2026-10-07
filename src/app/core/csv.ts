@@ -19,6 +19,7 @@ const COLUMNS: [string, (r: JumpRecord) => unknown][] = [
   ['peak_velocity_ms', (r) => r.kinematics?.peakVelocity],
   ['landing_flagged', (r) => (r.posture ? r.posture.flagged : undefined)],
   ['arm_swing', (r) => r.armSwing],
+  ['hops', (r) => r.hops?.length],
   ['confidence', (r) => r.confidence?.level],
   ['capture_fps', (r) => r.captureFps],
   ['method', (r) => r.method],

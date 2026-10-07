@@ -16,7 +16,13 @@ export interface FootSample {
   /** Nose and lowest heel, used for body size (frame-rate check). */
   noseY?: number;
   heelY?: number;
+  /** Key joints as [x, y, visibility], normalised to the image. For posture and kinematics. */
+  pts?: Partial<Record<Joint, [number, number, number]>>;
 }
+
+export type Joint =
+  | 'shoulderL' | 'shoulderR' | 'wristL' | 'wristR' | 'hipL' | 'hipR'
+  | 'kneeL' | 'kneeR' | 'ankleL' | 'ankleR' | 'heelL' | 'heelR' | 'toeL' | 'toeR';
 
 export type DetectMode = 'single' | 'drop';
 
@@ -256,7 +262,7 @@ export function refineFlight(
 }
 
 /** First air→ground transition in a window, with sub-frame timing. */
-function findTouchdown(window: FootSample[], floor: number, threshold: number): { frame: number; exact: number } | null {
+export function findTouchdown(window: FootSample[], floor: number, threshold: number): { frame: number; exact: number } | null {
   const h = window.map((s) => floor - s.footY);
   let idx = h.findIndex((v, k) => k > 0 && v <= threshold && h[k - 1] > threshold);
   if (idx < 0) idx = h.findIndex((v) => v <= threshold);
@@ -272,7 +278,7 @@ function findTouchdown(window: FootSample[], floor: number, threshold: number): 
 }
 
 /** 3-point median filter to knock out single-frame landmark jitter. */
-function smooth(samples: FootSample[]): FootSample[] {
+export function smooth(samples: FootSample[]): FootSample[] {
   const ok = samples.filter((s) => isFinite(s.footY));
   return ok.map((s, i) => {
     if (i === 0 || i === ok.length - 1) return s;
@@ -284,7 +290,7 @@ function smooth(samples: FootSample[]): FootSample[] {
  * Fit a straight line through the first (take-off) or last (landing) few airborne
  * points that are still close to the floor, and return where it crosses h = 0.
  */
-function extrapolateToFloor(
+export function extrapolateToFloor(
   pts: { x: number; h: number }[],
   threshold: number,
   dir: 'forward' | 'backward',

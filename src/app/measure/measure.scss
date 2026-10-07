@@ -70,12 +70,58 @@
   display: grid;
   place-items: center;
   min-height: 200px;
+  .frame-box {
+    position: relative;
+    display: inline-block;
+    max-width: 100%;
+    line-height: 0;
+  }
   canvas {
     display: block;
     max-width: 100%;
     max-height: 58vh;
     width: auto;
     height: auto;
+  }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    &.armed {
+      pointer-events: auto;
+      cursor: crosshair;
+    }
+    .cal {
+      stroke: #ffd23f;
+      fill: none;
+    }
+    .meas {
+      stroke: #3ddc97;
+      fill: none;
+      &.dash {
+        stroke-dasharray: 6 6;
+      }
+    }
+    .pt {
+      fill: rgba(0, 0, 0, 0.35);
+    }
+  }
+  .tap-prompt {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 90%;
+    padding: 4px 12px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-align: center;
+    pointer-events: none;
   }
   .busy {
     position: absolute;
@@ -507,5 +553,170 @@
   from {
     transform: scale(0.9);
     opacity: 0;
+  }
+}
+
+.hops {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  .hops-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    h3 {
+      margin: 0;
+    }
+  }
+}
+.hop-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  th,
+  td {
+    text-align: left;
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--line);
+  }
+  th {
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+    font-weight: 600;
+  }
+  tr.top td {
+    background: color-mix(in srgb, var(--blue) 10%, transparent);
+    font-weight: 600;
+  }
+  .x {
+    min-height: 32px;
+    padding: 0 10px;
+  }
+}
+
+.dist {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 0;
+  border: 1.5px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 10px 12px 12px;
+  background: var(--surface);
+  legend {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: 1.1rem;
+    padding: 0 4px;
+  }
+  .hint {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--ink-soft);
+  }
+  .dist-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 8px;
+    .field {
+      flex: 0 1 8em;
+    }
+    .btn.on {
+      background: var(--ink);
+      color: var(--paper);
+    }
+  }
+  .dist-out {
+    margin: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    strong {
+      font-family: var(--display);
+      font-size: 1.8rem;
+    }
+  }
+}
+.seg {
+  display: inline-flex;
+  justify-self: start;
+  border: 1.5px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  button {
+    min-height: 38px;
+    padding: 0 14px;
+    border: 0;
+    background: var(--surface);
+    color: var(--ink);
+    font-weight: 600;
+    cursor: pointer;
+    &.on {
+      background: var(--ink);
+      color: var(--paper);
+    }
+  }
+}
+
+.quality {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  p {
+    margin: 0;
+  }
+  .conf {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .pill {
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 0.85rem;
+    color: #fff;
+    &.high {
+      background: var(--ok);
+    }
+    &.medium {
+      background: #b7791f;
+    }
+    &.low {
+      background: var(--red);
+    }
+  }
+  .reasons {
+    margin: 0;
+    padding-left: 1.2em;
+    color: var(--ink-soft);
+  }
+  .ok-line {
+    color: var(--ok);
+    font-weight: 600;
+  }
+  .suggest {
+    font-weight: 600;
+  }
+  .kin {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 6px 12px;
+    margin: 4px 0 0;
+    dt {
+      font-size: 0.78rem;
+      color: var(--ink-soft);
+    }
+    dd {
+      margin: 0;
+      font-weight: 700;
+    }
   }
 }

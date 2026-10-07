@@ -10,7 +10,7 @@ import { CloudService } from '../core/cloud.service';
 import { JumpEditor } from '../shared/jump-editor';
 import { Metric as InsightMetric, Session, agreement, groupSessions, isPersonalRecord, readiness, tagStats } from '../core/insights';
 
-type MetricKey = 'height' | 'rsi' | 'contact' | 'rsiMod' | 'ttt';
+type MetricKey = 'height' | 'rsi' | 'contact' | 'rsiMod' | 'ttt' | 'distance' | 'reach';
 
 interface Metric {
   key: MetricKey;
@@ -711,7 +711,8 @@ export class History implements OnDestroy {
   /** Jumps that were a personal record when they were set. */
   protected readonly prIds = computed(() => {
     const all = this.ofType();
-    return new Set(all.filter((r) => isPersonalRecord(all, r)).map((r) => r.id));
+    const metric = this.type() === 'Broad jump' ? 'distanceCm' : 'heightCm';
+    return new Set(all.filter((r) => isPersonalRecord(all, r, metric)).map((r) => r.id));
   });
 
   protected readonly tagInsights = computed(() => tagStats(this.ofType()).slice(0, 6));
@@ -725,7 +726,10 @@ export class History implements OnDestroy {
   /** Session view applies to metrics that have a "best". */
   private readonly insightMetric = computed<InsightMetric | null>(() => {
     const k = this.metric().key;
-    return k === 'height' ? 'heightCm' : k === 'rsi' ? 'rsi' : k === 'rsiMod' ? 'rsiMod' : null;
+    const map: Partial<Record<MetricKey, InsightMetric>> = {
+      height: 'heightCm', rsi: 'rsi', rsiMod: 'rsiMod', distance: 'distanceCm', reach: 'reachCm',
+    };
+    return map[k] ?? null;
   });
   protected readonly canGroup = computed(() => this.insightMetric() !== null && this.sessionsAll().length < this.filtered().length);
 
@@ -735,7 +739,7 @@ export class History implements OnDestroy {
     if (!m || !this.bySession()) return null;
     const r = readiness(groupSessions(this.filtered(), this.type(), m, this.scoreMode()));
     if (!r) return null;
-    const conv = (v: number) => (m === 'heightCm' ? toUnits(v, this.units()) : v);
+    const conv = (v: number) => (m === 'heightCm' || m === 'distanceCm' || m === 'reachCm' ? toUnits(v, this.units()) : v);
     return { lo: conv(r.baseline - r.swc), hi: conv(r.baseline + r.swc) };
   });
   protected readonly best = computed(() => maxBy(this.filtered(), (r) => r.heightCm));
@@ -760,7 +764,9 @@ export class History implements OnDestroy {
   private readonly allMetrics = computed<Metric[]>(() => {
     const u = this.units();
     return [
+      { key: 'distance', name: `Distance (${u})`, get: (r) => (r.distanceCm === undefined ? undefined : toUnits(r.distanceCm, u)), higherIsBetter: true },
       { key: 'height', name: `Height (${u})`, get: (r) => toUnits(r.heightCm, u), higherIsBetter: true },
+      { key: 'reach', name: `Reach (${u})`, get: (r) => (r.reachCm === undefined ? undefined : toUnits(r.reachCm, u)), higherIsBetter: true },
       { key: 'rsi', name: 'RSI', get: (r) => r.rsi, higherIsBetter: true },
       { key: 'contact', name: 'Contact time (ms)', get: (r) => r.contactMs, higherIsBetter: false },
       { key: 'rsiMod', name: 'RSI-mod', get: (r) => r.rsiMod, higherIsBetter: true },
@@ -772,10 +778,17 @@ export class History implements OnDestroy {
   protected readonly metrics = computed(() =>
     this.allMetrics().filter((m) => this.filtered().filter((r) => m.get(r) !== undefined).length >= 2),
   );
-  protected readonly chosenMetric = signal<MetricKey>('height');
-  protected readonly metric = computed(
-    () => this.metrics().find((m) => m.key === this.chosenMetric()) ?? this.allMetrics()[0],
-  );
+  protected readonly chosenMetric = signal<MetricKey | null>(null);
+  protected readonly metric = computed(() => {
+    const ms = this.metrics();
+    // Broad jumps are about distance; everything else defaults to height.
+    const fallback = this.type() === 'Broad jump' ? 'distance' : 'height';
+    return (
+      ms.find((m) => m.key === this.chosenMetric()) ??
+      ms.find((m) => m.key === fallback) ??
+      this.allMetrics().find((m) => m.key === 'height')!
+    );
+  });
 
   protected readonly chartPoints = computed<ChartPoint[]>(() => {
     const m = this.metric();
@@ -783,9 +796,9 @@ export class History implements OnDestroy {
     const im = this.insightMetric();
     if (im && this.bySession() && this.canGroup()) {
       return groupSessions(this.filtered(), this.type(), im, this.scoreMode()).map((s) => {
-        const value = m.get({ ...s.jumps[0], heightCm: s.score, rsi: s.score, rsiMod: s.score })!;
+        const value = m.get({ ...s.jumps[0], heightCm: s.score, rsi: s.score, rsiMod: s.score, distanceCm: s.score, reachCm: s.score })!;
         const text =
-          m.key === 'height' ? `${formatNumber(value, 1)} ${u}` : `${m.name} ${formatNumber(value, 2)}`;
+          m.key === 'height' || m.key === 'distance' || m.key === 'reach' ? `${formatNumber(value, 1)} ${u}` : `${m.name} ${formatNumber(value, 2)}`;
         return { id: s.id, date: s.start, value, text: `Session: ${text} (${s.jumps.length} jumps)` };
       });
     }
@@ -794,7 +807,7 @@ export class History implements OnDestroy {
       .map((r) => {
         const value = m.get(r)!;
         const text =
-          m.key === 'height'
+          m.key === 'height' || m.key === 'distance' || m.key === 'reach'
             ? `${formatNumber(value, 1)} ${u}`
             : m.key === 'rsi' || m.key === 'rsiMod'
               ? `${m.name} ${formatNumber(value, 2)}`

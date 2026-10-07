@@ -3,10 +3,14 @@ import { DecimalPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import {
+  G,
+  Hop,
   JUMP_TYPE_HINT,
   JUMP_TYPES,
   JumpType,
   Units,
+  isDistanceType,
+  isRepeated,
   fromUnits,
   heightFromFlight,
   heightUncertaintyCm,
@@ -33,6 +37,24 @@ import { Recorder, Recording } from './recorder';
 import { TagPicker } from '../shared/tag-picker';
 import { groupSessions, isPersonalRecord, milestonesCrossed, readiness, sessionIdFor } from '../core/insights';
 import { uuid } from '../core/store.service';
+import {
+  HopEvent,
+  best5Rsi,
+  confidenceOf,
+  detectArmSwing,
+  footVisibility,
+  hopsToStats,
+  kinematics,
+  metresPerUnit,
+  postureCheck,
+  scaledDistanceCm,
+} from '../core/pose-analysis';
+
+interface Pt {
+  x: number;
+  y: number;
+}
+type TapTarget = 'calA' | 'calB' | 'p1' | 'p2';
 
 export type MarkKey = 'start' | 'contact' | 'air' | 'ground';
 
@@ -110,9 +132,44 @@ export class Measure implements OnDestroy {
   /** Sub-frame instants from auto-detection; each is dropped when its mark is edited. */
   protected readonly exact = signal<Partial<Record<MarkKey, number>>>({});
   protected readonly method = signal<'manual' | 'auto' | 'auto-adjusted'>('manual');
+  protected readonly isRep = computed(() => isRepeated(this.type()));
+  protected readonly isDist = computed(() => isDistanceType(this.type()));
   protected readonly markDefs = computed<MarkDef[]>(() =>
-    this.isDrop() ? [MARKS.contact, MARKS.air, MARKS.ground] : [MARKS.start, MARKS.air, MARKS.ground],
+    this.isDrop()
+      ? [MARKS.contact, MARKS.air, MARKS.ground]
+      : this.isRep()
+        ? [MARKS.air, MARKS.ground]
+        : [MARKS.start, MARKS.air, MARKS.ground],
   );
+
+  // Repeated jumps: every hop, as sub-frame take-off/landing instants.
+  protected readonly hopEvents = signal<HopEvent[]>([]);
+  protected readonly hopTrace = signal<{ trace: FootSample[]; floor: number } | null>(null);
+  protected readonly hops = computed<Hop[]>(() => {
+    const ev = this.hopEvents();
+    if (!ev.length || !this.realFps()) return [];
+    return hopsToStats(ev, (a, b) => this.realSeconds(a, b));
+  });
+  /** Hops that count towards the best-5 score. */
+  protected readonly bestHopIdx = computed(() => {
+    const ranked = this.hops()
+      .map((h, i) => ({ h, i }))
+      .filter((x) => x.h.rsi !== null)
+      .sort((a, b) => b.h.rsi! - a.h.rsi!);
+    return new Set(ranked.slice(0, 5).map((x) => x.i));
+  });
+
+  // Pose samples around the marks, for technique analysis.
+  private readonly poseSamples = signal<Map<number, FootSample>>(new Map());
+  private readonly standFrames = signal<number[]>([]);
+  protected readonly videoSize = signal<{ w: number; h: number } | null>(null);
+
+  // Distance tool (broad jump, jump & reach). Points are in video pixels.
+  protected readonly tapping = signal<TapTarget | null>(null);
+  protected readonly pts = signal<Partial<Record<TapTarget, Pt>>>({});
+  /** Length of the reference object, cm. */
+  protected readonly calCm = signal<number | null>(100);
+  protected readonly scaleMode = signal<'object' | 'body'>('object');
 
   // Auto-detect
   protected readonly detecting = signal(false);
@@ -177,6 +234,7 @@ export class Measure implements OnDestroy {
 
   protected readonly result = computed(() => {
     const fps = this.realFps();
+    if (this.isRep()) return fps ? this.repeatResult(fps) : null;
     const air = this.at('air');
     const ground = this.at('ground');
     if (!fps || air === null || ground === null || ground <= air) return null;
@@ -235,6 +293,178 @@ export class Measure implements OnDestroy {
     return fileTime * (fileFps / fps);
   }
 
+  /** 10/5 score: the best five hops by RSI. */
+  private repeatResult(fps: number) {
+    const b = best5Rsi(this.hops());
+    if (!b) return null;
+    const flight = Math.sqrt((8 * b.heightCm) / 100 / G);
+    const exact = this.method() === 'auto';
+    return {
+      flightMs: flight * 1000,
+      heightCm: b.heightCm,
+      velocity: takeoffVelocity(flight),
+      errCm: heightUncertaintyCm(flight, fps) * (exact ? 0.5 : 1),
+      powerW: null as number | null,
+      frames: flight * fps,
+      contactMs: b.contactMs as number | null,
+      rsi: b.rsi as number | null,
+      fctRatio: b.contactMs > 0 ? flight / (b.contactMs / 1000) : null,
+      tttMs: null as number | null,
+      rsiMod: null as number | null,
+      implausible: b.contactMs < 80 || b.contactMs > 1000,
+    };
+  }
+
+  /** Metres per normalised image unit, from body size while standing. */
+  private readonly bodyScale = computed(() => {
+    const smp = this.poseSamples();
+    const standing = this.standFrames()
+      .map((f) => smp.get(f))
+      .filter((s): s is FootSample => !!s);
+    return metresPerUnit(standing, (this.store.settings().statureCm ?? 175) / 100);
+  });
+
+  /** Technique and quality from the pose: landing, arm swing, movement phases, confidence. */
+  protected readonly deep = computed(() => {
+    const r = this.result();
+    const fps = this.realFps();
+    const size = this.videoSize();
+    if (!r || !fps || !size) return null;
+    const smp = this.poseSamples();
+    const m = this.marks();
+    const exactBoth = this.exact().air !== undefined && this.exact().ground !== undefined;
+
+    if (this.isRep()) {
+      const vis = footVisibility(this.hopTrace()?.trace ?? []);
+      return {
+        posture: null,
+        armSwing: null,
+        kinematics: null,
+        confidence: confidenceOf({
+          fps, auto: this.method() === 'auto', subFrame: this.method() === 'auto', fpsCheck: 'idle',
+          poseVisibility: vis, postureFlagged: false, implausible: r.implausible,
+        }),
+      };
+    }
+    if (m.air === null || m.ground === null) return null;
+    const S = this.bodyScale();
+    const aspect = size.w / size.h;
+    const takeoff = smp.get(m.air - 1);
+    const landing = smp.get(m.ground);
+    const flightSec = r.flightMs / 1000;
+    const posture =
+      takeoff && landing && this.type() !== 'Broad jump' ? postureCheck(takeoff, landing, flightSec, S, aspect) : null;
+    const sorted = [...smp.values()].sort((a, b) => a.frame - b.frame);
+    const F = m.ground - m.air;
+    const armWindow = sorted.filter((s) => s.frame >= m.air! - fps * 0.6 && s.frame <= m.air! + F * 0.3);
+    const armSwing = this.isDrop() ? null : detectArmSwing(armWindow);
+    const pre = sorted.filter((s) => s.frame < m.air! && s.frame >= m.air! - fps * 1.6);
+    const kin =
+      !this.isDrop() && this.type() !== 'Broad jump' && pre.length >= 5
+        ? kinematics({
+            samples: pre,
+            movementStart: m.start,
+            takeoffFrame: this.at('air')!,
+            timeOf: (f) => this.realSeconds(0, f),
+            metresPerUnit: S,
+            flightSec,
+            massKg: this.store.settings().massKg,
+          })
+        : null;
+    const state = this.fpsCheck().state;
+    const confidence = confidenceOf({
+      fps,
+      auto: this.method() === 'auto',
+      subFrame: exactBoth,
+      fpsCheck: state,
+      poseVisibility: footVisibility([takeoff, landing].filter((s): s is FootSample => !!s)),
+      postureFlagged: !!posture?.flagged,
+      implausible: r.implausible,
+    });
+    return { posture, armSwing, kinematics: kin, confidence };
+  });
+
+  // ---------- Distance ----------
+
+  protected readonly cmPerPx = computed(() => {
+    const size = this.videoSize();
+    if (!size) return null;
+    if (this.scaleMode() === 'body') {
+      const S = this.bodyScale();
+      return S ? (S * 100) / size.h : null;
+    }
+    const p = this.pts();
+    const L = this.calCm();
+    if (!p.calA || !p.calB || !L || L <= 0) return null;
+    const d = Math.hypot(p.calB.x - p.calA.x, p.calB.y - p.calA.y);
+    return d > 4 ? L / d : null;
+  });
+
+  /** Broad jump: horizontal distance. Jump & reach: vertical gain of the fingertips. */
+  protected readonly distanceCm = computed(() => {
+    const p = this.pts();
+    const s = this.cmPerPx();
+    if (!this.isDist() || !p.p1 || !p.p2 || !s) return null;
+    return scaledDistanceCm(p.p1, p.p2, s, this.type() === 'Broad jump' ? 'x' : 'y');
+  });
+
+  protected readonly calInUnits = computed(() => {
+    const cm = this.calCm();
+    return cm === null ? null : Math.round(toUnits(cm, this.units()) * 10) / 10;
+  });
+
+  setCal(v: number | null) {
+    const n = Number(v);
+    this.calCm.set(n > 0 ? fromUnits(n, this.units()) : null);
+    this.savedId.set(null);
+  }
+
+  /** Arm the next tap on the video to set this point. Jumps to the relevant frame. */
+  startTap(t: TapTarget) {
+    this.stopPlay();
+    this.tapping.set(this.tapping() === t ? null : t);
+    if (this.type() === 'Broad jump') {
+      if (t === 'p1' && this.marks().air !== null) this.goTo(Math.max(0, this.marks().air! - 1));
+      if (t === 'p2' && this.marks().ground !== null) this.goTo(this.marks().ground!);
+    } else if (this.type() === 'Jump & reach' && t === 'p2') {
+      const m = this.marks();
+      if (m.air !== null && m.ground !== null) this.goTo(Math.round((m.air + m.ground) / 2));
+    }
+  }
+
+  onStageTap(ev: MouseEvent) {
+    const t = this.tapping();
+    const size = this.videoSize();
+    if (!t || !size) return;
+    const rect = (ev.currentTarget as Element).getBoundingClientRect();
+    const pt = {
+      x: ((ev.clientX - rect.left) / rect.width) * size.w,
+      y: ((ev.clientY - rect.top) / rect.height) * size.h,
+    };
+    this.pts.update((p) => ({ ...p, [t]: pt }));
+    this.tapping.set(t === 'calA' ? 'calB' : null);
+    this.savedId.set(null);
+  }
+
+  protected readonly tapPrompt = computed(() => {
+    const t = this.tapping();
+    const broad = this.type() === 'Broad jump';
+    switch (t) {
+      case 'calA':
+        return 'Tap one end of the object you know the length of.';
+      case 'calB':
+        return 'Now tap the other end.';
+      case 'p1':
+        return broad ? 'Tap the tip of your toes at take-off.' : 'Tap your fingertips while standing with your arm stretched up.';
+      case 'p2':
+        return broad
+          ? 'Tap the back of your heel that landed closest to the start.'
+          : 'Step to your highest point and tap your fingertips.';
+      default:
+        return null;
+    }
+  });
+
   protected readonly best = computed(() => this.store.bestFor(this.type()));
 
   private source: FrameSource | null = null;
@@ -250,7 +480,7 @@ export class Measure implements OnDestroy {
       const loaded = this.loaded();
       clearTimeout(timer);
       if (!loaded || m.air === null || m.ground === null || m.ground - m.air < 4) return;
-      timer = setTimeout(() => untracked(() => this.checkFps()), 700);
+      timer = setTimeout(() => untracked(() => this.analyse()), 700);
     });
   }
 
@@ -288,6 +518,7 @@ export class Measure implements OnDestroy {
       this.source = source;
       this.engine.set(source.kind);
       this.totalFrames.set(source.frameCount);
+      this.videoSize.set(source.width && source.height ? { w: source.width, h: source.height } : null);
       // Live recordings have uneven frame timing; the camera's rate is the honest figure.
       const fileFps = live?.fps ?? info.containerFps ?? source.fps;
       this.fileFps.set(Math.round(fileFps * 100) / 100);
@@ -338,6 +569,12 @@ export class Measure implements OnDestroy {
     this.celebration.set(null);
     this.refValue.set(null);
     this.refOpen.set(false);
+    this.videoSize.set(null);
+    this.poseSamples.set(new Map());
+    this.standFrames.set([]);
+    this.pts.set({});
+    this.tapping.set(null);
+    this.scaleMode.set('object');
   }
 
   private clearMarks() {
@@ -347,14 +584,38 @@ export class Measure implements OnDestroy {
     this.detection.set(null);
     this.detectError.set(null);
     this.savedId.set(null);
+    this.hopEvents.set([]);
+    this.hopTrace.set(null);
   }
 
   setType(t: JumpType) {
     const wasDrop = this.isDrop();
+    const wasRep = this.isRep();
     this.type.set(t);
     this.savedId.set(null);
-    // Drop jumps time different events, so earlier auto-detection no longer applies.
-    if (wasDrop !== isDropJump(t) && this.detection()) this.clearMarks();
+    this.tapping.set(null);
+    // Drop jumps and hop tests time different events, so earlier detection no longer applies.
+    if ((wasDrop !== isDropJump(t) || wasRep !== isRepeated(t)) && (this.detection() || this.hopEvents().length)) {
+      this.clearMarks();
+    }
+  }
+
+  /** Repeated jumps, by hand: mark a take-off and landing, then add it as a hop. */
+  addHop() {
+    const a = this.at('air');
+    const g = this.at('ground');
+    if (a === null || g === null || g <= a) return;
+    this.hopEvents.update((ev) => [...ev, { takeoff: a, landing: g }].sort((x, y) => x.takeoff - y.takeoff));
+    this.marks.update((m) => ({ ...m, air: null, ground: null }));
+    this.exact.set({});
+    if (this.method() === 'auto') this.method.set('auto-adjusted');
+    this.savedId.set(null);
+  }
+
+  removeHop(i: number) {
+    this.hopEvents.update((ev) => ev.filter((_, k) => k !== i));
+    if (this.method() === 'auto') this.method.set('auto-adjusted');
+    this.savedId.set(null);
   }
 
   // ---------- Frame navigation ----------
@@ -498,7 +759,7 @@ export class Measure implements OnDestroy {
     this.savedId.set(null);
     // Let the motion check re-evaluate against the new choice.
     this.lastCheckKey = '';
-    this.checkFps();
+    this.analyse();
   }
 
   /** Accept the frame rate the motion check suggests. */
@@ -520,11 +781,11 @@ export class Measure implements OnDestroy {
    * Check the frame rate against physics: fit the hips' parabola in the air.
    * Silently fixes slow-motion clips saved at normal speed, unless the user chose a rate.
    */
-  async checkFps() {
+  async analyse() {
     const m = this.marks();
     const base = this.fileStatedFps();
-    if (!this.source || m.air === null || m.ground === null || !base) return;
-    const key = `${m.air}-${m.ground}-${this.fpsSource() === 'manual' ? this.realFps() : ''}`;
+    if (!this.source || m.air === null || m.ground === null || !base || this.isRep()) return;
+    const key = `${m.start}-${m.air}-${m.ground}-${this.fpsSource() === 'manual' ? this.realFps() : ''}`;
     if (key === this.lastCheckKey) return;
     this.lastCheckKey = key;
     this.checkAbort?.abort();
@@ -544,14 +805,29 @@ export class Measure implements OnDestroy {
     // Standing frames: well before the dip, else well after landing.
     let standFrames = pick(0, m.air - Math.ceil(1.5 * F) - 1, 6);
     if (standFrames.length < 3) standFrames = pick(m.ground + Math.ceil(1.5 * F), total - 1, 6);
+    // Technique: take-off and touchdown poses, and the push-off before take-off.
+    const fpsNow = this.realFps() ?? base;
+    const pushFrom = Math.max(
+      0,
+      Math.min(m.start ?? Infinity, m.air - Math.round(fpsNow * 1.1)) - Math.round(fpsNow * 0.15),
+    );
+    const technique = [
+      Math.max(0, m.air - 1),
+      m.ground,
+      ...pick(pushFrom, m.air - 1, 26),
+      ...pick(m.air, m.air + Math.round(F * 0.3), 3),
+    ];
+    this.standFrames.set(standFrames);
 
     try {
-      const known = new Map<number, FootSample>((this.detection()?.trace ?? []).map((t) => [t.frame, t]));
-      const need = [...flightFrames, ...standFrames].filter((f) => !known.has(f));
+      const known = new Map<number, FootSample>(this.poseSamples());
+      for (const t of this.detection()?.trace ?? []) if (t.pts && !known.has(t.frame)) known.set(t.frame, t);
+      const need = [...new Set([...flightFrames, ...standFrames, ...technique])].filter((f) => !known.has(f));
       if (need.length) {
         for (const smp of await this.pose.samplePoses(this.source, need, abort.signal)) known.set(smp.frame, smp);
       }
       if (abort.signal.aborted) return;
+      this.poseSamples.set(new Map(known));
       const inFlight = [...known.values()].filter((p) => p.frame > m.air! && p.frame < m.ground!);
       const standing = standFrames.map((f) => known.get(f)).filter((p): p is FootSample => !!p);
       const stature = (this.store.settings().statureCm ?? 175) / 100;
@@ -605,6 +881,16 @@ export class Measure implements OnDestroy {
     this.elapsed.set(0);
     this.elapsedTimer = setInterval(() => this.elapsed.set(Math.round((performance.now() - t0) / 1000)), 500);
     try {
+      if (this.isRep()) {
+        const r = await this.pose.detectHops(this.source, fps, (p) => this.progress.set(p), this.abort.signal);
+        this.hopEvents.set(r.events);
+        this.hopTrace.set({ trace: r.trace, floor: r.floor });
+        this.marks.set({ ...NO_MARKS });
+        this.exact.set({});
+        this.method.set('auto');
+        this.goTo(Math.floor(r.events[0].takeoff));
+        return;
+      }
       const mode = this.isDrop() ? 'drop' : 'single';
       const r = await this.pose.detect(this.source, fps, mode, (p) => this.progress.set(p), this.abort.signal);
       this.detection.set(r);
@@ -642,8 +928,12 @@ export class Measure implements OnDestroy {
     if (!r || !fps || this.orderError()) return;
     const round = (v: number | null, d = 1) => (v === null ? undefined : Math.round(v * 10 ** d) / 10 ** d);
     const before = this.store.history();
-    const prevBest = Math.max(0, ...before.filter((x) => x.type === this.type()).map((x) => x.heightCm));
+    const dist = this.distanceCm();
+    const byDistance = this.type() === 'Broad jump' && dist !== null;
+    const metric = byDistance ? 'distanceCm' : 'heightCm';
+    const prevBest = Math.max(0, ...before.filter((x) => x.type === this.type()).map((x) => x[metric] ?? 0));
     const ref = Number(this.refValue());
+    const deep = this.deep();
     const rec = this.store.add({
       date: this.jumpDate(),
       sessionId: sessionIdFor(before, this.jumpDate()) ?? uuid(),
@@ -664,11 +954,18 @@ export class Measure implements OnDestroy {
       boxCm: this.isDrop() ? (this.store.settings().boxCm ?? undefined) : undefined,
       timeToTakeoffMs: round(r.tttMs),
       rsiMod: round(r.rsiMod, 2),
+      posture: deep?.posture ?? undefined,
+      armSwing: deep?.armSwing ?? undefined,
+      confidence: deep?.confidence,
+      kinematics: deep?.kinematics ?? undefined,
+      hops: this.isRep() ? this.hops() : undefined,
+      distanceCm: dist !== null && this.type() === 'Broad jump' ? round(dist) : undefined,
+      reachCm: dist !== null && this.type() === 'Jump & reach' ? round(dist) : undefined,
     });
     this.savedId.set(rec.id);
     requestPersistentStorage();
     const all = this.store.history();
-    const pr = isPersonalRecord(all, rec);
+    const pr = isPersonalRecord(all, rec, metric);
     const sessions = groupSessions(all, this.type(), 'heightCm', this.store.settings().sessionScore);
     const rd = readiness(sessions);
     const status = rd && sessions.at(-1)?.jumps.some((j) => j.id === rec.id)
@@ -676,12 +973,12 @@ export class Measure implements OnDestroy {
       : null;
     this.celebration.set({
       pr,
-      gainCm: pr && prevBest > 0 ? rec.heightCm - prevBest : null,
-      milestones: milestonesCrossed(all, rec, this.units()),
+      gainCm: pr && prevBest > 0 ? (rec[metric] ?? 0) - prevBest : null,
+      milestones: byDistance ? [] : milestonesCrossed(all, rec, this.units()),
       readiness: status,
     });
     if (pr) navigator.vibrate?.([30, 40, 30]);
-    if (this.saveClip()) this.storeClip(rec.id, r.heightCm, r.rsi, r.rsiMod);
+    if (this.saveClip()) this.storeClip(rec.id, byDistance ? dist! : r.heightCm, r.rsi, r.rsiMod);
   }
 
   private async storeClip(id: string, heightCm: number, rsiValue: number | null, rsiModValue: number | null) {
@@ -694,12 +991,14 @@ export class Measure implements OnDestroy {
       air: 'Take-off',
       ground: 'Landing',
     };
-    const marks = this.markDefs()
-      .filter((d) => m[d.key] !== null)
-      .map((d) => ({ frame: m[d.key]!, label: labels[d.key] }));
+    const marks = this.isRep()
+      ? this.hopEvents().map((e, i) => ({ frame: Math.round(e.takeoff), label: `Hop ${i + 1}` }))
+      : this.markDefs()
+          .filter((d) => m[d.key] !== null)
+          .map((d) => ({ frame: m[d.key]!, label: labels[d.key] }));
     const u = this.units();
     const value = formatNumber(toUnits(heightCm, u), 1);
-    const extra = rsiValue !== null ? `RSI ${rsiValue.toFixed(2)}, ` : rsiModValue !== null ? `RSI-mod ${rsiModValue.toFixed(2)}, ` : '';
+    const extra = this.isRep() && rsiValue !== null ? `RSI ${rsiValue.toFixed(2)} (best 5 of ${this.hops().length} hops), ` : rsiValue !== null ? `RSI ${rsiValue.toFixed(2)}, ` : rsiModValue !== null ? `RSI-mod ${rsiModValue.toFixed(2)}, ` : '';
     const date = new Date(this.jumpDate()).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
     this.clipError.set(null);
     this.clipProgress.set(0);

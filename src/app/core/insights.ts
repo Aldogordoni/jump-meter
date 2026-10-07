@@ -11,7 +11,7 @@
 import type { JumpRecord, JumpType } from './jump-math';
 
 export type SessionScoreMode = 'best' | 'mean3';
-export type Metric = 'heightCm' | 'rsi' | 'rsiMod';
+export type Metric = 'heightCm' | 'rsi' | 'rsiMod' | 'distanceCm' | 'reachCm';
 
 /** Jumps closer together than this belong to the same session. */
 export const SESSION_GAP_MS = 90 * 60_000;

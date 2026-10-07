@@ -69,7 +69,46 @@
     </div>
 
     <div class="stage" [attr.data-engine]="engine()">
-      <canvas #frame aria-label="Video frame"></canvas>
+      <div class="frame-box">
+        <canvas #frame aria-label="Video frame"></canvas>
+        @if (isDist() && videoSize(); as v) {
+          <svg
+            class="overlay"
+            [class.armed]="tapping()"
+            [attr.viewBox]="'0 0 ' + v.w + ' ' + v.h"
+            preserveAspectRatio="none"
+            (click)="onStageTap($event)"
+            [attr.aria-hidden]="!tapping()"
+            [attr.aria-label]="tapPrompt()"
+            role="img"
+          >
+            @if (pts(); as p) {
+              @if (p.calA && p.calB && scaleMode() === 'object') {
+                <line [attr.x1]="p.calA.x" [attr.y1]="p.calA.y" [attr.x2]="p.calB.x" [attr.y2]="p.calB.y" class="cal" [attr.stroke-width]="v.w / 220" />
+              }
+              @if (p.p1 && p.p2) {
+                @if (type() === 'Broad jump') {
+                  <line [attr.x1]="p.p1.x" [attr.y1]="p.p1.y" [attr.x2]="p.p2.x" [attr.y2]="p.p1.y" class="meas" [attr.stroke-width]="v.w / 220" />
+                  <line [attr.x1]="p.p2.x" [attr.y1]="p.p1.y" [attr.x2]="p.p2.x" [attr.y2]="p.p2.y" class="meas dash" [attr.stroke-width]="v.w / 400" />
+                } @else {
+                  <line [attr.x1]="p.p1.x" [attr.y1]="p.p1.y" [attr.x2]="p.p1.x" [attr.y2]="p.p2.y" class="meas" [attr.stroke-width]="v.w / 220" />
+                  <line [attr.x1]="p.p1.x" [attr.y1]="p.p2.y" [attr.x2]="p.p2.x" [attr.y2]="p.p2.y" class="meas dash" [attr.stroke-width]="v.w / 400" />
+                }
+              }
+              @for (k of ['calA', 'calB', 'p1', 'p2']; track k) {
+                @if ($any(p)[k]; as q) {
+                  @if (scaleMode() === 'object' || k === 'p1' || k === 'p2') {
+                    <circle [attr.cx]="q.x" [attr.cy]="q.y" [attr.r]="v.w / 90" [class]="k.startsWith('cal') ? 'pt cal' : 'pt meas'" [attr.stroke-width]="v.w / 300" />
+                  }
+                }
+              }
+            }
+          </svg>
+        }
+      </div>
+      @if (tapPrompt(); as tp) {
+        <span class="tap-prompt" role="status">{{ tp }}</span>
+      }
       @if (markOnFrame(currentFrame()); as m) {
         <span class="tag" [class]="'tag ' + m.key">{{ m.title }}</span>
       }
@@ -201,7 +240,9 @@
             <button class="btn ghost" type="button" (click)="cancelDetect()">Cancel</button>
           </div>
         } @else {
-          <button class="btn primary" type="button" (click)="autoDetect()">{{ isDrop() ? 'Find the box landing, take-off and landing for me' : 'Find take-off and landing for me' }}</button>
+          <button class="btn primary" type="button" (click)="autoDetect()">
+            {{ isRep() ? 'Find every hop for me' : isDrop() ? 'Find the box landing, take-off and landing for me' : 'Find take-off and landing for me' }}
+          </button>
           <span class="small muted">Tracks your feet with on-device AI. Check the result and nudge it if needed.</span>
         }
         @if (detectError()) {
@@ -228,6 +269,88 @@
           </div>
         }
       </div>
+
+      @if (isRep()) {
+        <div class="hops">
+          <div class="hops-head">
+            <h3>Hops <span class="muted">({{ hops().length }})</span></h3>
+            <button class="btn" type="button" (click)="addHop()" [disabled]="markAt('air') === null || markAt('ground') === null || !!orderError()">
+              Add hop from the marks above
+            </button>
+          </div>
+          @if (hops().length) {
+            <table class="hop-table">
+              <thead>
+                <tr><th>#</th><th>Contact</th><th>Flight</th><th>Height</th><th>RSI</th><th><span class="sr-only">Remove</span></th></tr>
+              </thead>
+              <tbody>
+                @for (h of hops(); track $index; let i = $index) {
+                  <tr [class.top]="bestHopIdx().has(i)">
+                    <td><button class="link-btn num" type="button" (click)="goTo(hopEvents()[i].takeoff)" [attr.aria-label]="'Show hop ' + (i + 1)">{{ i + 1 }}</button></td>
+                    <td class="num">{{ h.contactMs === null ? '–' : (h.contactMs | number: '1.0-0') + ' ms' }}</td>
+                    <td class="num">{{ h.flightMs | number: '1.0-0' }} ms</td>
+                    <td class="num">{{ h.heightCm | height: 'full' : 1 }}</td>
+                    <td class="num">{{ h.rsi === null ? '–' : (h.rsi | number: '1.2-2') }}</td>
+                    <td><button class="btn ghost x" type="button" (click)="removeHop(i)" [attr.aria-label]="'Remove hop ' + (i + 1)">×</button></td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+            <p class="small muted">Highlighted rows are your best five by RSI, which make the 10/5 score. The first hop has no contact time. Remove any hop that isn't real.</p>
+          } @else {
+            <p class="small muted">Let the AI find every hop, or mark a take-off and landing above and add them one at a time.</p>
+          }
+        </div>
+        @if (hopTrace(); as ht) {
+          <figure class="trace">
+            <app-foot-trace [trace]="ht.trace" [baseline]="ht.floor" [firstAir]="null" [firstGround]="null" [contact]="null" [current]="currentFrame()" (seek)="goTo($event)" />
+            <figcaption class="small muted">Foot height the AI saw. Tap the graph to jump to that frame.</figcaption>
+          </figure>
+        }
+      }
+
+      @if (isDist()) {
+        <fieldset class="dist">
+          <legend>{{ type() === 'Broad jump' ? 'Measure the distance' : 'Measure your reach' }}</legend>
+          <div class="seg" role="radiogroup" aria-label="Scale from">
+            <button type="button" role="radio" [attr.aria-checked]="scaleMode() === 'object'" [class.on]="scaleMode() === 'object'" (click)="scaleMode.set('object')">Known length</button>
+            <button type="button" role="radio" [attr.aria-checked]="scaleMode() === 'body'" [class.on]="scaleMode() === 'body'" (click)="scaleMode.set('body')">My body height</button>
+          </div>
+          @if (scaleMode() === 'object') {
+            <div class="dist-row">
+              <div class="field">
+                <label for="cal">Its length ({{ units() }})</label>
+                <input id="cal" type="number" inputmode="decimal" min="1" step="any" [ngModel]="calInUnits()" (ngModelChange)="setCal($event)" />
+              </div>
+              <button class="btn" type="button" [class.on]="tapping() === 'calA' || tapping() === 'calB'" (click)="startTap('calA')">
+                {{ pts().calA && pts().calB ? 'Re-tap its ends' : 'Tap its two ends' }}
+              </button>
+            </div>
+            <p class="hint">A tape measure, a mat or a line of known length, lying in the same plane as the jump.</p>
+          } @else {
+            <p class="hint">
+              @if (cmPerPx()) {
+                Scaled from your standing height ({{ (store.settings().statureCm ?? 175) | height: 'full' : 0 }}). Less precise than a known length.
+              } @else {
+                Mark take-off and landing first (or let the AI find them) so the app can measure your body while you stand. Set your height in Setup.
+              }
+            </p>
+          }
+          <div class="dist-row">
+            <button class="btn" type="button" [class.on]="tapping() === 'p1'" (click)="startTap('p1')">
+              {{ type() === 'Broad jump' ? 'Tap toes at take-off' : 'Tap standing reach' }}@if (pts().p1) { ✓}
+            </button>
+            <button class="btn" type="button" [class.on]="tapping() === 'p2'" (click)="startTap('p2')">
+              {{ type() === 'Broad jump' ? 'Tap heel at landing' : 'Tap highest reach' }}@if (pts().p2) { ✓}
+            </button>
+          </div>
+          @if (distanceCm() !== null) {
+            <p class="dist-out"><span class="lbl">{{ type() === 'Broad jump' ? 'Distance' : 'Reach above standing' }}</span> <strong class="num">{{ distanceCm()! | height: 'full' : 1 }}</strong></p>
+          } @else if (pts().p1 && pts().p2) {
+            <p class="small muted">Set the scale to see the result.</p>
+          }
+        </fieldset>
+      }
 
       @if (detection(); as d) {
         <figure class="trace">
@@ -261,9 +384,15 @@
       </div>
       <div class="stats">
         <dl>
+          @if (distanceCm() !== null) {
+            <div class="key">
+              <dt>{{ type() === 'Broad jump' ? 'Distance' : 'Reach gain' }}</dt>
+              <dd class="num">{{ distanceCm()! | height: 'full' : 1 }}</dd>
+            </div>
+          }
           @if (r.rsi !== null) {
             <div class="key">
-              <dt>RSI</dt>
+              <dt>{{ isRep() ? 'RSI, best 5' : 'RSI' }}</dt>
               <dd class="num">{{ r.rsi | number: '1.2-2' }}</dd>
             </div>
             <div>
@@ -315,12 +444,77 @@
           @if (isDrop() && r.rsi === null) {
             Set the box landing frame to get RSI.
           }
-          @if (!isDrop() && r.rsiMod === null) {
+          @if (isRep()) {
+            Height and contact time are the averages of your best five hops.
+          }
+          @if (!isDrop() && !isRep() && r.rsiMod === null) {
             Set the movement start to get RSI-modified.
           }
         </p>
         @if (r.implausible) {
           <p class="warn">Those times are outside a normal jump. Check the frames and the fps.</p>
+        }
+
+        @if (deep(); as d) {
+          <div class="quality">
+            <p class="conf">
+              <span class="pill" [class]="'pill ' + d.confidence.level">{{ d.confidence.level === 'high' ? 'High' : d.confidence.level === 'medium' ? 'Medium' : 'Low' }} confidence</span>
+              @if (fpsCheck().state === 'running') {
+                <span class="small muted">Checking your technique…</span>
+              }
+            </p>
+            @if (d.confidence.reasons.length) {
+              <ul class="reasons small">
+                @for (why of d.confidence.reasons; track why) {
+                  <li>{{ why }}</li>
+                }
+              </ul>
+            }
+            @if (d.armSwing === true && type() === 'CMJ') {
+              <p class="suggest">
+                Looks like you swung your arms.
+                <button class="btn ghost inline" type="button" (click)="setType('CMJ + arms')">Save as CMJ + arms</button>
+              </p>
+            } @else if (d.armSwing === false && type() === 'CMJ + arms') {
+              <p class="suggest">
+                No arm swing seen.
+                <button class="btn ghost inline" type="button" (click)="setType('CMJ')">Save as CMJ</button>
+              </p>
+            }
+            @if (d.posture; as p) {
+              @if (p.flagged) {
+                <p class="warn">
+                  You landed with more bent knees than you took off with (knee {{ p.kneeTakeoff }}° at take-off,
+                  {{ p.kneeLanding }}° at landing). That adds air time, so this may read about
+                  {{ p.inflationCm | height: 'full' : 1 }} high. Land on straight legs, then bend.
+                </p>
+              } @else {
+                <p class="small ok-line">Landing looks good: knees {{ p.kneeTakeoff }}° at take-off, {{ p.kneeLanding }}° at landing.</p>
+              }
+            }
+            @if (d.kinematics; as k) {
+              @if (k.depthCm !== null || k.momentum !== null) {
+                <dl class="kin">
+                  @if (k.depthCm !== null) {
+                    <div><dt>Dip depth</dt><dd class="num">{{ k.depthCm | height: 'full' : 0 }}</dd></div>
+                  }
+                  @if (k.eccentricMs !== null) {
+                    <div><dt>Down phase</dt><dd class="num">{{ k.eccentricMs }} ms</dd></div>
+                  }
+                  @if (k.concentricMs !== null) {
+                    <div><dt>Push phase</dt><dd class="num">{{ k.concentricMs }} ms</dd></div>
+                  }
+                  @if (k.peakVelocity !== null) {
+                    <div><dt>Peak hip speed</dt><dd class="num">{{ k.peakVelocity | number: '1.2-2' }} m/s</dd></div>
+                  }
+                  @if (k.momentum !== null) {
+                    <div><dt>Momentum</dt><dd class="num">{{ k.momentum }} kg·m/s</dd></div>
+                  }
+                </dl>
+                <p class="small muted">Dip and phases are estimated from your hips in the video, so treat them as a guide.</p>
+              }
+            }
+          </div>
         }
 
         <div class="save">
