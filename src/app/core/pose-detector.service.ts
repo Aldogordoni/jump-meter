@@ -3,6 +3,7 @@ import type { PoseLandmarker } from '@mediapipe/tasks-vision';
 import { coarseLocate, DetectionError, DetectMode, findMovementStart, FlightEstimate, FootSample, Joint, refineFlight } from './flight-detect';
 import { FrameSource } from './frame-source';
 import { coarseHops, findHops, type HopEvent } from './pose-analysis';
+import type { WorkerIn, WorkerOut } from './pose.worker';
 
 const REMOTE_MODEL =
   'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task';
@@ -14,8 +15,10 @@ const FOOT_POINTS = [29, 30, 31, 32]; // heels and toes
 /** Pose input size. The model works at 256 px internally, so bigger only costs time. */
 const POSE_MAX_SIDE = 384;
 const DELEGATE_KEY = 'jump-meter.delegate';
+const ENGINE_KEY = 'jump-meter.pose-engine';
 
 type Delegate = 'GPU' | 'CPU';
+type Landmark = { x: number; y: number; visibility?: number };
 
 export interface DetectProgress {
   stage: 'loading' | 'scanning' | 'refining';
@@ -27,37 +30,18 @@ export interface DetectResult extends FlightEstimate {
   trace: FootSample[];
 }
 
+/** Something that turns an image into pose landmarks: a Web Worker, or the main thread. */
+interface Engine {
+  kind: 'worker' | 'main';
+  detect(img: ImageBitmap | HTMLCanvasElement): Promise<Landmark[] | undefined>;
+}
+
 @Injectable({ providedIn: 'root' })
 export class PoseDetectorService {
-  private readonly models = new Map<Delegate, Promise<PoseLandmarker>>();
+  private enginePromise?: Promise<Engine>;
   private modelPath?: Promise<string>;
-
-  private load(delegate: Delegate): Promise<PoseLandmarker> {
-    let p = this.models.get(delegate);
-    if (!p) {
-      p = withTimeout(
-        (async () => {
-          const { FilesetResolver, PoseLandmarker } = await import('@mediapipe/tasks-vision');
-          const wasm = await FilesetResolver.forVisionTasks(new URL('mediapipe/wasm', document.baseURI).href);
-          this.modelPath ??= (async () => {
-            const local = new URL('models/pose_landmarker_full.task', document.baseURI).href;
-            return (await exists(local)) ? local : REMOTE_MODEL;
-          })();
-          return PoseLandmarker.createFromOptions(wasm, {
-            baseOptions: { modelAssetPath: await this.modelPath, delegate },
-            runningMode: 'IMAGE',
-            numPoses: 1,
-            minPoseDetectionConfidence: 0.4,
-            minPosePresenceConfidence: 0.4,
-          });
-        })(),
-        delegate === 'GPU' ? 20000 : 60000,
-      );
-      p.catch(() => this.models.delete(delegate));
-      this.models.set(delegate, p);
-    }
-    return p;
-  }
+  /** Which engine is running, for diagnostics. */
+  engineKind: Engine['kind'] | null = null;
 
   private preferred(): Delegate {
     try {
@@ -75,20 +59,199 @@ export class PoseDetectorService {
     }
   }
 
-  /** Warm up the model in the background so the first analysis starts faster. */
-  preload() {
-    this.load(this.preferred()).catch(() => undefined);
+  private model(): Promise<string> {
+    this.modelPath ??= (async () => {
+      const local = new URL('models/pose_landmarker_full.task', document.baseURI).href;
+      return (await exists(local)) ? local : REMOTE_MODEL;
+    })();
+    return this.modelPath;
   }
 
-  /** Load the preferred model, falling back to the other delegate if it fails. */
-  private async loadAny(): Promise<{ model: PoseLandmarker; delegate: Delegate }> {
-    const first = this.preferred();
-    try {
-      return { model: await this.load(first), delegate: first };
-    } catch {
-      const other: Delegate = first === 'GPU' ? 'CPU' : 'GPU';
-      return { model: await this.load(other), delegate: other };
+  /** Warm up the model in the background so the first analysis starts faster. */
+  preload() {
+    this.engine().catch(() => undefined);
+  }
+
+  private engine(): Promise<Engine> {
+    if (!this.enginePromise) {
+      const p = (async () => {
+        let workerFailed = false;
+        if (workerSupported()) {
+          try {
+            return await this.workerEngine();
+          } catch (e) {
+            console.warn('[jump-meter] pose worker unavailable, using the main thread', e);
+            workerFailed = true;
+          }
+        }
+        const main = await this.mainEngine();
+        // The worker failed where the main thread works: skip the worker next time on this device.
+        if (workerFailed) {
+          try {
+            localStorage.setItem(ENGINE_KEY, 'main');
+          } catch {
+            /* ignore */
+          }
+        }
+        return main;
+      })();
+      p.then((e) => (this.engineKind = e.kind)).catch(() => (this.enginePromise = undefined));
+      this.enginePromise = p;
     }
+    return this.enginePromise;
+  }
+
+  private async workerEngine(): Promise<Engine> {
+    const worker = new Worker(new URL('./pose.worker', import.meta.url), { type: 'module' });
+    const pending = new Map<number, { resolve: (v: Landmark[] | undefined) => void; reject: (e: Error) => void }>();
+    let nextId = 1;
+    await withTimeout(
+      new Promise<void>((resolve, reject) => {
+        worker.onerror = (e) => reject(new Error(e.message || 'worker error'));
+        worker.onmessage = ({ data }: MessageEvent<WorkerOut>) => {
+          switch (data.type) {
+            case 'ready':
+              this.remember(data.delegate);
+              resolve();
+              break;
+            case 'error':
+              reject(new Error(data.message));
+              break;
+            case 'delegate':
+              this.remember(data.delegate);
+              console.info(`[jump-meter] pose switched to ${data.delegate}: ${Math.round(data.ms)} ms vs ${Math.round(data.altMs)} ms`);
+              break;
+            case 'result':
+              pending.get(data.id)?.resolve(data.lm ? data.lm.map(([x, y, visibility]) => ({ x, y, visibility })) : undefined);
+              pending.delete(data.id);
+              break;
+            case 'fail':
+              pending.get(data.id)?.reject(new Error(data.message));
+              pending.delete(data.id);
+              break;
+          }
+        };
+        const init: WorkerIn = {
+          type: 'init',
+          wasmBase: new URL('mediapipe/wasm', document.baseURI).href,
+          modelPath: '',
+          delegate: this.preferred(),
+        };
+        this.model().then((modelPath) => worker.postMessage({ ...init, modelPath }), reject);
+      }),
+      30000,
+    ).catch((e) => {
+      worker.terminate();
+      throw e;
+    });
+    worker.onerror = (e) => {
+      for (const p of pending.values()) p.reject(new Error(e.message || 'worker error'));
+      pending.clear();
+    };
+    return {
+      kind: 'worker',
+      async detect(img) {
+        // The frame source may reuse its bitmap, so send a copy (cheap at pose size).
+        const copy = await createImageBitmap(img);
+        const id = nextId++;
+        return new Promise((resolve, reject) => {
+          pending.set(id, { resolve, reject });
+          const msg: WorkerIn = { type: 'detect', id, image: copy };
+          worker.postMessage(msg, [copy]);
+        });
+      },
+    };
+  }
+
+  /** Fallback: MediaPipe on the main thread, with the same GPU/CPU benchmark. */
+  private async mainEngine(): Promise<Engine> {
+    const { FilesetResolver, PoseLandmarker } = await import('@mediapipe/tasks-vision');
+    const wasm = await FilesetResolver.forVisionTasks(new URL('mediapipe/wasm', document.baseURI).href);
+    const modelAssetPath = await this.model();
+    const create = (delegate: Delegate) =>
+      withTimeout(
+        PoseLandmarker.createFromOptions(wasm, {
+          baseOptions: { modelAssetPath, delegate },
+          runningMode: 'IMAGE',
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.4,
+          minPosePresenceConfidence: 0.4,
+        }),
+        delegate === 'GPU' ? 20000 : 60000,
+      );
+    let delegate = this.preferred();
+    let model: PoseLandmarker;
+    try {
+      model = await create(delegate);
+    } catch {
+      delegate = delegate === 'GPU' ? 'CPU' : 'GPU';
+      model = await create(delegate);
+    }
+    const timings: number[] = [];
+    let benchmarked = false;
+    return {
+      kind: 'main',
+      detect: async (img) => {
+        const t = performance.now();
+        const lm = model.detect(img).landmarks[0];
+        timings.push(performance.now() - t);
+        if (!benchmarked && timings.length === 4) {
+          benchmarked = true;
+          const avg = (timings[1] + timings[2] + timings[3]) / 3;
+          if (avg > 90) {
+            const other: Delegate = delegate === 'GPU' ? 'CPU' : 'GPU';
+            try {
+              const alt = await create(other);
+              alt.detect(img);
+              const t2 = performance.now();
+              alt.detect(img);
+              alt.detect(img);
+              const altAvg = (performance.now() - t2) / 2;
+              if (altAvg < avg * 0.7) {
+                model = alt;
+                delegate = other;
+                this.remember(other);
+              }
+            } catch {
+              /* keep the current one */
+            }
+          }
+        }
+        return lm;
+      },
+    };
+  }
+
+  private async ready(onProgress?: (p: DetectProgress) => void): Promise<Engine> {
+    onProgress?.({ stage: 'loading', done: 0, total: 1 });
+    try {
+      return await this.engine();
+    } catch {
+      throw new DetectionError("Couldn't load the pose model. Check your connection and try again.");
+    }
+  }
+
+  /** Pose for each frame, in order, with progress. */
+  private async run(
+    engine: Engine,
+    source: FrameSource,
+    frames: number[],
+    onSample: (s: FootSample) => void,
+    onStep?: (done: number) => void,
+    signal?: AbortSignal,
+  ) {
+    let done = 0;
+    await source.scan(
+      frames,
+      POSE_MAX_SIDE,
+      async (i, img) => {
+        onSample(toSample(i, await engine.detect(img)));
+        onStep?.(++done);
+        // The worker keeps the UI responsive; the main-thread engine needs a breather.
+        if (engine.kind === 'main') await yieldToUi(done);
+      },
+      signal,
+    );
   }
 
   async detect(
@@ -98,72 +261,18 @@ export class PoseDetectorService {
     onProgress: (p: DetectProgress) => void,
     signal?: AbortSignal,
   ): Promise<DetectResult> {
-    onProgress({ stage: 'loading', done: 0, total: 1 });
-    let model: PoseLandmarker;
-    let delegate: Delegate;
-    try {
-      ({ model, delegate } = await this.loadAny());
-    } catch {
-      throw new DetectionError("Couldn't load the pose model. Check your connection and try again.");
-    }
-
+    const engine = await this.ready(onProgress);
     const total = source.frameCount;
     const cache = new Map<number, FootSample>();
-    const timings: number[] = [];
-    let benchmarked = false;
-
-    const measure = async (frame: number, image: ImageBitmap) => {
-      const t = performance.now();
-      const lm = model.detect(image).landmarks[0];
-      timings.push(performance.now() - t);
-
-      // After a few frames, check the other delegate isn't much faster on this device.
-      if (!benchmarked && timings.length === 4) {
-        benchmarked = true;
-        const avg = (timings[1] + timings[2] + timings[3]) / 3;
-        if (avg > 90) {
-          const other: Delegate = delegate === 'GPU' ? 'CPU' : 'GPU';
-          try {
-            const alt = await this.load(other);
-            alt.detect(image); // warm-up
-            const t2 = performance.now();
-            alt.detect(image);
-            alt.detect(image);
-            const altAvg = (performance.now() - t2) / 2;
-            if (altAvg < avg * 0.7) {
-              model = alt;
-              delegate = other;
-              this.remember(other);
-            }
-            console.info(`[jump-meter] pose ${delegate === other ? 'switched to' : 'kept'} ${delegate}: ${Math.round(avg)} ms vs ${Math.round(altAvg)} ms`);
-          } catch {
-            /* keep the current one */
-          }
-        }
-      }
-
-      cache.set(frame, toSample(frame, lm));
-    };
+    const keep = (s: FootSample) => cache.set(s.frame, s);
 
     // Pass 1: sparse scan – about every 30 ms of real time, capped for long clips.
     const step = Math.max(1, Math.round(realFps * 0.03), Math.ceil(total / 200));
     const sparseFrames: number[] = [];
     for (let f = 0; f < total; f += step) sparseFrames.push(f);
-    let done = 0;
     const tStart = performance.now();
-    await source.scan(
-      sparseFrames,
-      POSE_MAX_SIDE,
-      async (i, img) => {
-        await measure(i, img);
-        onProgress({ stage: 'scanning', done: ++done, total: sparseFrames.length });
-        await yieldToUi(done);
-      },
-      signal,
-    );
-    console.info(
-      `[jump-meter] scan: ${sparseFrames.length} frames in ${Math.round(performance.now() - tStart)} ms (${delegate})`,
-    );
+    await this.run(engine, source, sparseFrames, keep, (d) => onProgress({ stage: 'scanning', done: d, total: sparseFrames.length }), signal);
+    console.info(`[jump-meter] scan: ${sparseFrames.length} frames in ${Math.round(performance.now() - tStart)} ms (${engine.kind})`);
     const sparse = sparseFrames.map((f) => cache.get(f)!).filter(Boolean);
     const coarse = coarseLocate(sparse, mode);
 
@@ -181,17 +290,7 @@ export class PoseDetectorService {
         ? range(coarse.dropLastAir - pad, coarse.dropFirstGround + pad)
         : [];
     const dense = [...contactFrames, ...upFrames, ...downFrames].filter((f) => !cache.has(f));
-    done = 0;
-    await source.scan(
-      dense,
-      POSE_MAX_SIDE,
-      async (i, img) => {
-        await measure(i, img);
-        onProgress({ stage: 'refining', done: ++done, total: dense.length });
-        await yieldToUi(done);
-      },
-      signal,
-    );
+    await this.run(engine, source, dense, keep, (d) => onProgress({ stage: 'refining', done: d, total: dense.length }), signal);
 
     const up = upFrames.map((f) => cache.get(f)!).filter(Boolean);
     const down = downFrames.map((f) => cache.get(f)!).filter(Boolean);
@@ -212,40 +311,23 @@ export class PoseDetectorService {
     onProgress: (p: DetectProgress) => void,
     signal?: AbortSignal,
   ): Promise<{ trace: FootSample[]; events: HopEvent[]; floor: number }> {
-    onProgress({ stage: 'loading', done: 0, total: 1 });
-    let model: PoseLandmarker;
-    try {
-      ({ model } = await this.loadAny());
-    } catch {
-      throw new DetectionError("Couldn't load the pose model. Check your connection and try again.");
-    }
+    const engine = await this.ready(onProgress);
     const total = source.frameCount;
     const cache = new Map<number, FootSample>();
-    const run = async (frames: number[], stage: DetectProgress['stage']) => {
-      let done = 0;
-      await source.scan(
-        frames,
-        POSE_MAX_SIDE,
-        async (i, img) => {
-          cache.set(i, toSample(i, model.detect(img).landmarks[0]));
-          onProgress({ stage, done: ++done, total: frames.length });
-          await yieldToUi(done);
-        },
-        signal,
-      );
-    };
+    const keep = (s: FootSample) => cache.set(s.frame, s);
     // Hops are short, so scan a little finer than for a single jump.
     const step = Math.max(1, Math.round(realFps * 0.025), Math.ceil(total / 300));
     const sparse: number[] = [];
     for (let f = 0; f < total; f += step) sparse.push(f);
-    await run(sparse, 'scanning');
+    await this.run(engine, source, sparse, keep, (d) => onProgress({ stage: 'scanning', done: d, total: sparse.length }), signal);
     const coarse = coarseHops(sparse.map((f) => cache.get(f)!).filter(Boolean));
     if (!coarse) throw new DetectionError("Couldn't find repeated hops. Film side-on with your feet clearly in shot.");
     const dense = new Set<number>();
     for (const t of coarse.transitions) {
       for (let f = Math.max(0, t.from - 2); f <= Math.min(total - 1, t.to + 2); f++) if (!cache.has(f)) dense.add(f);
     }
-    await run([...dense].sort((a, b) => a - b), 'refining');
+    const denseList = [...dense].sort((a, b) => a - b);
+    await this.run(engine, source, denseList, keep, (d) => onProgress({ stage: 'refining', done: d, total: denseList.length }), signal);
     const trace = [...cache.values()].filter((s) => isFinite(s.footY)).sort((a, b) => a.frame - b.frame);
     const events = findHops(trace, coarse.floor, coarse.threshold);
     if (events.length < 2) throw new DetectionError('Found fewer than two hops. Keep recording until the last landing.');
@@ -259,28 +341,20 @@ export class PoseDetectorService {
     const w = video.videoWidth;
     const h = video.videoHeight;
     if (!w || !h) return null;
-    const { model } = await this.loadAny();
+    const engine = await this.engine();
     const s = Math.min(1, 256 / Math.max(w, h));
     const c = (this.liveCanvas ??= document.createElement('canvas'));
     c.width = Math.round(w * s);
     c.height = Math.round(h * s);
     c.getContext('2d')!.drawImage(video, 0, 0, c.width, c.height);
-    return toSample(0, model.detect(c).landmarks[0]);
+    return toSample(0, await engine.detect(c));
   }
 
   /** Run the pose model on specific frames (used for the frame-rate check after manual marking). */
   async samplePoses(source: FrameSource, frames: number[], signal?: AbortSignal): Promise<FootSample[]> {
-    const { model } = await this.loadAny();
+    const engine = await this.engine();
     const out: FootSample[] = [];
-    await source.scan(
-      frames,
-      POSE_MAX_SIDE,
-      async (i, img) => {
-        out.push(toSample(i, model.detect(img).landmarks[0]));
-        await yieldToUi(out.length);
-      },
-      signal,
-    );
+    await this.run(engine, source, frames, (s) => out.push(s), undefined, signal);
     return out.sort((a, b) => a.frame - b.frame);
   }
 }
@@ -291,7 +365,7 @@ const JOINTS: Record<Joint, number> = {
   ankleL: 27, ankleR: 28, heelL: 29, heelR: 30, toeL: 31, toeR: 32,
 };
 
-export function toSample(frame: number, lm: { x: number; y: number; visibility?: number }[] | undefined): FootSample {
+export function toSample(frame: number, lm: Landmark[] | undefined): FootSample {
   if (!lm) return { frame, footY: NaN, legLen: NaN };
   const footY = Math.max(...FOOT_POINTS.map((i) => lm[i].y));
   const hipY = (lm[L_HIP].y + lm[R_HIP].y) / 2;
@@ -301,6 +375,15 @@ export function toSample(frame: number, lm: { x: number; y: number; visibility?:
     pts[name] = [lm[i].x, lm[i].y, lm[i].visibility ?? 1];
   }
   return { frame, footY, legLen: ankleY - hipY, hipY, noseY: lm[0].y, heelY: Math.max(lm[29].y, lm[30].y), pts };
+}
+
+function workerSupported(): boolean {
+  try {
+    if (localStorage.getItem(ENGINE_KEY) === 'main') return false;
+  } catch {
+    /* ignore */
+  }
+  return typeof Worker !== 'undefined' && typeof OffscreenCanvas !== 'undefined' && typeof createImageBitmap !== 'undefined';
 }
 
 /** Let the progress bar repaint every few frames. */

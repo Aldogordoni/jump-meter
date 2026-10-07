@@ -59,8 +59,14 @@
                 "glob": "vision_wasm_nosimd_internal.*",
                 "input": "node_modules/@mediapipe/tasks-vision/wasm",
                 "output": "mediapipe/wasm"
+              },
+              {
+                "glob": "vision_wasm_module_internal.*",
+                "input": "node_modules/@mediapipe/tasks-vision/wasm",
+                "output": "mediapipe/wasm"
               }
             ],
+            "webWorkerTsConfig": "tsconfig.worker.json",
             "styles": [
               "@fontsource/barlow/400.css",
               "@fontsource/barlow/500.css",
