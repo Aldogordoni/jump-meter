@@ -30,6 +30,9 @@ import { CloudService } from '../core/cloud.service';
 import { VaneGauge } from '../shared/vane-gauge';
 import { FootTrace } from '../shared/foot-trace';
 import { Recorder, Recording } from './recorder';
+import { TagPicker } from '../shared/tag-picker';
+import { groupSessions, isPersonalRecord, milestonesCrossed, readiness, sessionIdFor } from '../core/insights';
+import { uuid } from '../core/store.service';
 
 export type MarkKey = 'start' | 'contact' | 'air' | 'ground';
 
@@ -59,7 +62,7 @@ const POWER_TYPES: JumpType[] = ['CMJ', 'CMJ + arms', 'Squat jump'];
 
 @Component({
   selector: 'app-measure',
-  imports: [FormsModule, DecimalPipe, RouterLink, VaneGauge, FootTrace, HeightPipe, Recorder],
+  imports: [FormsModule, DecimalPipe, RouterLink, VaneGauge, FootTrace, HeightPipe, Recorder, TagPicker],
   templateUrl: './measure.html',
   styleUrl: './measure.scss',
 })
@@ -134,6 +137,12 @@ export class Measure implements OnDestroy {
   protected readonly note = signal('');
   protected readonly savedId = signal<string | null>(null);
   protected readonly saveClip = signal(true);
+  protected readonly tags = signal<string[]>([]);
+  protected readonly refOpen = signal(false);
+  protected readonly refValue = signal<number | null>(null);
+  protected readonly refDevice = signal('');
+  /** Shown after saving: new record, milestones, today's readiness. */
+  protected readonly celebration = signal<{ pr: boolean; gainCm: number | null; milestones: number[]; readiness: string | null } | null>(null);
   protected readonly clipProgress = signal<number | null>(null);
   protected readonly clipError = signal<string | null>(null);
 
@@ -326,6 +335,9 @@ export class Measure implements OnDestroy {
     this.detecting.set(false);
     this.progress.set(null);
     this.note.set('');
+    this.celebration.set(null);
+    this.refValue.set(null);
+    this.refOpen.set(false);
   }
 
   private clearMarks() {
@@ -629,8 +641,17 @@ export class Measure implements OnDestroy {
     const fps = this.realFps();
     if (!r || !fps || this.orderError()) return;
     const round = (v: number | null, d = 1) => (v === null ? undefined : Math.round(v * 10 ** d) / 10 ** d);
+    const before = this.store.history();
+    const prevBest = Math.max(0, ...before.filter((x) => x.type === this.type()).map((x) => x.heightCm));
+    const ref = Number(this.refValue());
     const rec = this.store.add({
       date: this.jumpDate(),
+      sessionId: sessionIdFor(before, this.jumpDate()) ?? uuid(),
+      tags: this.tags().length ? this.tags() : undefined,
+      reference:
+        ref > 0
+          ? { heightCm: Math.round(fromUnits(ref, this.units()) * 10) / 10, device: this.refDevice().trim() || 'Other device' }
+          : undefined,
       heightCm: round(r.heightCm)!,
       flightMs: round(r.flightMs)!,
       captureFps: fps,
@@ -646,6 +667,20 @@ export class Measure implements OnDestroy {
     });
     this.savedId.set(rec.id);
     requestPersistentStorage();
+    const all = this.store.history();
+    const pr = isPersonalRecord(all, rec);
+    const sessions = groupSessions(all, this.type(), 'heightCm', this.store.settings().sessionScore);
+    const rd = readiness(sessions);
+    const status = rd && sessions.at(-1)?.jumps.some((j) => j.id === rec.id)
+      ? `${rd.diffPct > 0 ? '+' : ''}${rd.diffPct.toFixed(1)}% vs your baseline (${{ fresh: 'fresh', normal: 'normal', 'slightly-down': 'slightly down', fatigued: 'fatigued' }[rd.status]})`
+      : null;
+    this.celebration.set({
+      pr,
+      gainCm: pr && prevBest > 0 ? rec.heightCm - prevBest : null,
+      milestones: milestonesCrossed(all, rec, this.units()),
+      readiness: status,
+    });
+    if (pr) navigator.vibrate?.([30, 40, 30]);
     if (this.saveClip()) this.storeClip(rec.id, r.heightCm, r.rsi, r.rsiMod);
   }
 

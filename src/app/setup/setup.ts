@@ -6,6 +6,7 @@ import { JUMP_TYPES, JumpRecord, fromUnits, toUnits } from '../core/jump-math';
 import { clipStore, requestPersistentStorage } from '../core/clip-store';
 import { CloudService } from '../core/cloud.service';
 import { BackupProgress, buildBackup, readBackup, restoreClips } from '../core/backup';
+import { toCsv } from '../core/csv';
 
 @Component({
   selector: 'app-setup',
@@ -94,6 +95,29 @@ import { BackupProgress, buildBackup, readBackup, restoreClips } from '../core/b
             }
           </select>
         </div>
+        <div class="field">
+          <label for="sscore">Session score</label>
+          <select id="sscore" [ngModel]="store.settings().sessionScore" (ngModelChange)="store.updateSettings({ sessionScore: $event })">
+            <option value="best">Best jump</option>
+            <option value="mean3">Average of best 3</option>
+          </select>
+          <span class="hint">How a session counts in charts, goals and readiness. Average of 3 is steadier.</span>
+        </div>
+        <div class="field">
+          <label for="sex">Compare with</label>
+          <select id="sex" [ngModel]="store.settings().sex" (ngModelChange)="store.updateSettings({ sex: $event })">
+            <option [ngValue]="null">Not set</option>
+            <option value="male">Men</option>
+            <option value="female">Women</option>
+          </select>
+          <span class="hint">Which published reference ranges to show on Train.</span>
+        </div>
+        <div class="field">
+          <label class="inline-check">
+            <input type="checkbox" [ngModel]="store.settings().haptics" (ngModelChange)="store.updateSettings({ haptics: $event })" />
+            Vibrate and beep on detections
+          </label>
+        </div>
       </div>
     </section>
 
@@ -155,6 +179,7 @@ import { BackupProgress, buildBackup, readBackup, restoreClips } from '../core/b
       </label>
       <div class="row">
         <button class="btn" type="button" (click)="export()" [disabled]="!store.history().length || working()">Export backup</button>
+        <button class="btn" type="button" (click)="exportCsv()" [disabled]="!store.history().length">Export spreadsheet (CSV)</button>
         <label class="btn" [class.disabled]="working()">
           Import backup
           <input type="file" accept=".zip,.json,application/zip,application/json" (change)="import($event)" class="sr-only" [disabled]="working()" />
@@ -220,6 +245,14 @@ import { BackupProgress, buildBackup, readBackup, restoreClips } from '../core/b
     }
     .small {
       font-size: 0.85rem;
+    }
+    .inline-check {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-height: 44px;
+      font-weight: 600;
+      color: var(--ink);
     }
     .check {
       display: flex;
@@ -318,6 +351,12 @@ export class Setup {
       this.working.set(false);
       this.progress.set(null);
     }
+  }
+
+  protected exportCsv() {
+    const csv = toCsv(this.store.history());
+    this.download(new File([csv], `jump-meter-${new Date().toISOString().slice(0, 10)}.csv`, { type: 'text/csv' }));
+    this.message.set('Spreadsheet downloaded. It opens in Excel, Numbers and Google Sheets.');
   }
 
   private download(file: File) {

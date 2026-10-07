@@ -24,7 +24,14 @@ export interface ChartPoint {
           <line [attr.x1]="padL" [attr.x2]="W - padR" [attr.y1]="y(t)" [attr.y2]="y(t)" class="grid" />
           <text [attr.x]="padL - 6" [attr.y]="y(t) + 4" text-anchor="end" class="axis">{{ fmtTick(t) }}</text>
         }
+        @if (bandRect(); as b) {
+          <rect [attr.x]="padL" [attr.width]="W - padL - padR" [attr.y]="b.y" [attr.height]="b.h" class="band" />
+          <text [attr.x]="W - padR - 4" [attr.y]="b.y - 3" text-anchor="end" class="axis">your normal range</text>
+        }
         <polyline [attr.points]="bestLine()" class="line" />
+        @if (trendLine()) {
+          <polyline [attr.points]="trendLine()" class="trend" />
+        }
         @for (p of dots(); track p.d.id) {
           <circle [attr.cx]="p.x" [attr.cy]="p.y" [attr.r]="active()?.id === p.d.id ? 6 : 4" [class.best]="p.best" class="dot" />
           <circle
@@ -48,7 +55,7 @@ export interface ChartPoint {
           <strong class="num">{{ a.text }}</strong>
           on {{ a.date | date: 'EEE d MMM, HH:mm' }}@if (a.note) {, {{ a.note }}}
         } @else {
-          Tap a dot for details. The line follows your best each day.
+          Tap a dot for details.@if (showTrend()) { The dashed line is your rolling average. }
         }
       </p>
     </div>
@@ -74,6 +81,16 @@ export interface ChartPoint {
       stroke-width: 2;
       stroke-linejoin: round;
       stroke-linecap: round;
+    }
+    .band {
+      fill: var(--blue);
+      opacity: 0.1;
+    }
+    .trend {
+      fill: none;
+      stroke: var(--ink-soft);
+      stroke-width: 1.5;
+      stroke-dasharray: 4 3;
     }
     .dot {
       fill: var(--surface);
@@ -105,6 +122,10 @@ export class ProgressChart {
   /** Decimal places on the axis. */
   readonly digits = input(0);
   readonly metricName = input('Value');
+  /** Shaded reference band (e.g. baseline ± smallest worthwhile change). */
+  readonly band = input<{ lo: number; hi: number } | null>(null);
+  /** Dashed rolling average (last 5 points). */
+  readonly showTrend = input(false);
   protected readonly active = signal<ChartPoint | null>(null);
 
   protected readonly W = 340;
@@ -118,8 +139,29 @@ export class ProgressChart {
   protected readonly first = computed(() => this.sorted()[0]?.date);
   protected readonly last = computed(() => this.sorted().at(-1)?.date);
 
+  protected readonly bandRect = computed(() => {
+    const b = this.band();
+    if (!b) return null;
+    const top = this.y(b.hi);
+    return { y: top, h: Math.max(2, this.y(b.lo) - top) };
+  });
+
+  protected readonly trendLine = computed(() => {
+    if (!this.showTrend()) return '';
+    const pts = this.sorted();
+    if (pts.length < 4) return '';
+    return pts
+      .map((p, i) => {
+        const win = pts.slice(Math.max(0, i - 4), i + 1);
+        const avg = win.reduce((a, q) => a + q.value, 0) / win.length;
+        return `${this.x(p.date).toFixed(1)},${this.y(avg).toFixed(1)}`;
+      })
+      .join(' ');
+  });
+
   private readonly yDomain = computed(() => {
-    const vs = this.sorted().map((p) => p.value);
+    const band = this.band();
+    const vs = [...this.sorted().map((p) => p.value), ...(band ? [band.lo, band.hi] : [])];
     const lo = Math.min(...vs);
     const hi = Math.max(...vs);
     const span = Math.max(hi - lo, Math.abs(hi) * 0.1, 1e-6);

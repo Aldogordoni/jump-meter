@@ -7,6 +7,8 @@ import { HeightPipe, formatNumber } from '../core/height.pipe';
 import { ChartPoint, ProgressChart } from '../shared/progress-chart';
 import { clipStore, StoredClip } from '../core/clip-store';
 import { CloudService } from '../core/cloud.service';
+import { JumpEditor } from '../shared/jump-editor';
+import { Metric as InsightMetric, Session, agreement, groupSessions, isPersonalRecord, readiness, tagStats } from '../core/insights';
 
 type MetricKey = 'height' | 'rsi' | 'contact' | 'rsiMod' | 'ttt';
 
@@ -19,7 +21,7 @@ interface Metric {
 
 @Component({
   selector: 'app-history',
-  imports: [DatePipe, DecimalPipe, RouterLink, ProgressChart, HeightPipe],
+  imports: [DatePipe, DecimalPipe, RouterLink, ProgressChart, HeightPipe, JumpEditor],
   template: `
     <h1>History</h1>
 
@@ -91,62 +93,149 @@ interface Metric {
         </div>
       }
 
+      @if (tagsInUse().length) {
+        <div class="chips small-chips tag-filter" role="group" aria-label="Filter by tag">
+          <button type="button" [class.on]="!tagFilter()" (click)="tagFilter.set(null)">All</button>
+          @for (t of tagsInUse(); track t) {
+            <button type="button" [class.on]="tagFilter() === t" [attr.aria-pressed]="tagFilter() === t" (click)="tagFilter.set(tagFilter() === t ? null : t)">{{ t }}</button>
+          }
+        </div>
+      }
+
       @if (chartPoints().length >= 2) {
+        @if (canGroup()) {
+          <div class="seg" role="radiogroup" aria-label="Chart points">
+            <button type="button" role="radio" [attr.aria-checked]="bySession()" [class.on]="bySession()" (click)="bySession.set(true)">Sessions</button>
+            <button type="button" role="radio" [attr.aria-checked]="!bySession()" [class.on]="!bySession()" (click)="bySession.set(false)">Every jump</button>
+          </div>
+        }
         <app-progress-chart
           [points]="chartPoints()"
           [higherIsBetter]="metric().higherIsBetter"
           [metricName]="metric().name"
+          [band]="normalBand()"
+          [showTrend]="chartPoints().length >= 4"
         />
       }
 
-      <ul class="list">
-        @for (r of filtered(); track r.id) {
-          <li>
-            <div class="h num">{{ r.heightCm | height: 'value' }} <small>{{ units() }}</small></div>
-            <div class="meta">
-              @if (editingDate() === r.id) {
-                <span class="date-edit">
-                  <input
-                    type="datetime-local"
-                    [value]="toLocal(r.date)"
-                    (change)="saveDate(r, $any($event.target).value)"
-                    [attr.aria-label]="'Date of the ' + r.type"
-                  />
-                  <button class="btn ghost" type="button" (click)="editingDate.set(null)">Done</button>
-                </span>
-              } @else {
-                <span>
-                  {{ r.date | date: 'EEE d MMM yyyy, HH:mm' }}
-                  <button class="link" type="button" (click)="editingDate.set(r.id)">Edit date</button>
-                </span>
-              }
-              @if (r.rsi !== undefined) {
-                <span class="stat">RSI {{ r.rsi | number: '1.2-2' }}, contact {{ r.contactMs | number: '1.0-0' }} ms@if (r.boxCm) {, {{ r.boxCm | height: 'full' : 0 }} box}</span>
-              }
-              @if (r.rsiMod !== undefined) {
-                <span class="stat">RSI-mod {{ r.rsiMod | number: '1.2-2' }}, {{ r.timeToTakeoffMs | number: '1.0-0' }} ms to take-off</span>
-              }
-              <span class="muted">
-                {{ r.flightMs | number: '1.0-0' }} ms flight, {{ r.captureFps }} fps, {{ methodLabel(r) }}
+      @if (tagInsights().length) {
+        <section class="panel">
+          <h2>What makes a difference</h2>
+          <p class="small muted">Average {{ type() }} height with each tag compared with without it.</p>
+          <ul class="tag-insights">
+            @for (t of tagInsights(); track t.tag) {
+              <li>
+                <span class="t">{{ t.tag }}</span>
+                <span class="num" [class.up]="t.diffPct > 0" [class.down]="t.diffPct < 0">{{ t.diffPct > 0 ? '+' : '' }}{{ t.diffPct | number: '1.1-1' }}%</span>
+                <span class="small muted">{{ t.withMean | height }} vs {{ t.withoutMean | height }}, {{ t.nWith }} vs {{ t.nWithout }} jumps</span>
+              </li>
+            }
+          </ul>
+        </section>
+      }
+
+      @if (validation(); as v) {
+        <section class="panel">
+          <h2>Agreement with your other device</h2>
+          <p class="small">
+            On {{ v.n }} jumps measured both ways, Jump Meter reads
+            <strong>{{ v.bias >= 0 ? 'higher' : 'lower' }} by {{ abs(v.bias) | height: 'full' : 1 }}</strong> on average.
+            95% of differences fall between {{ v.loaLow | height: 'full' : 1 }} and {{ v.loaHigh | height: 'full' : 1 }}
+            (mean difference {{ v.mape | number: '1.0-1' }}%@if (v.r !== null) {, correlation {{ v.r | number: '1.2-2' }}}).
+          </p>
+          <p class="small muted">Under 2 cm average difference and a correlation above 0.95 is excellent agreement.</p>
+        </section>
+      }
+
+      @for (sess of sessionsShown(); track sess.id) {
+        <section class="session" [attr.aria-label]="'Session ' + (sess.start | date: 'EEE d MMM')">
+          <header class="sess-head">
+            <span class="when">{{ sess.start | date: 'EEE d MMM yyyy, HH:mm' }}</span>
+            @if (sess.jumps.length > 1) {
+              <span class="small muted">
+                {{ sess.jumps.length }} jumps, best {{ sess.best | height }}, average {{ sess.mean | height }}@if (sess.cv !== null) {, variation {{ sess.cv | number: '1.1-1' }}%}
               </span>
-              @if (r.note) {
-                <span class="note">{{ r.note }}</span>
-              }
-              @if (clipIds().has(r.id) || r.hasClip) {
-                <button class="thumb" type="button" (click)="openClip(r)" [disabled]="opening() === r.id">
-                  @if (posters()[r.id]; as src) {
-                    <img [src]="src" alt="" />
+            }
+          </header>
+          <ul class="list">
+            @for (r of sess.jumps; track r.id) {
+              <li>
+                <div class="h num">
+                  {{ r.heightCm | height: 'value' }} <small>{{ units() }}</small>
+                  @if (prIds().has(r.id)) {
+                    <span class="badge pr" title="Personal record when it was set">PR</span>
                   }
-                  <span>{{ opening() === r.id ? 'Downloading clip…' : 'Watch clip' }}</span>
+                </div>
+                <div class="meta">
+                  <span>
+                    {{ r.date | date: 'HH:mm' }}
+                    <button class="link" type="button" (click)="editing.set(editing() === r.id ? null : r.id)">Edit</button>
+                  </span>
+                  @if (r.rsi !== undefined) {
+                    <span class="stat">RSI {{ r.rsi | number: '1.2-2' }}, contact {{ r.contactMs | number: '1.0-0' }} ms@if (r.boxCm) {, {{ r.boxCm | height: 'full' : 0 }} box}</span>
+                  }
+                  @if (r.rsiMod !== undefined) {
+                    <span class="stat">RSI-mod {{ r.rsiMod | number: '1.2-2' }}, {{ r.timeToTakeoffMs | number: '1.0-0' }} ms to take-off</span>
+                  }
+                  @if (r.hops?.length) {
+                    <span class="stat">{{ r.hops!.length }} hops, best RSI {{ bestHopRsi(r) | number: '1.2-2' }}</span>
+                  }
+                  @if (r.distanceCm !== undefined) {
+                    <span class="stat">Distance {{ r.distanceCm | height: 'full' : 0 }}</span>
+                  }
+                  @if (r.reachCm !== undefined) {
+                    <span class="stat">Reach {{ r.reachCm | height }}</span>
+                  }
+                  @if (r.kinematics; as k) {
+                    @if (k.depthCm !== null) {
+                      <span class="muted">Dip {{ k.depthCm | height: 'full' : 0 }}@if (k.concentricMs !== null) {, push {{ k.concentricMs | number: '1.0-0' }} ms}</span>
+                    }
+                  }
+                  @if (r.posture?.flagged) {
+                    <span class="warn-line">Landing looked bent: may read about {{ r.posture!.inflationCm | height: 'full' : 1 }} high</span>
+                  }
+                  @if (r.confidence && r.confidence.level !== 'high') {
+                    <span class="muted">Confidence: {{ r.confidence.level }}</span>
+                  }
+                  <span class="muted">
+                    {{ r.flightMs | number: '1.0-0' }} ms flight, {{ r.captureFps }} fps, {{ methodLabel(r) }}
+                  </span>
+                  @if (r.reference) {
+                    <span class="muted">{{ r.reference.device }}: {{ r.reference.heightCm | height }}</span>
+                  }
+                  @if (r.tags?.length) {
+                    <span class="tags">
+                      @for (t of r.tags!; track t) {
+                        <span class="tag">{{ t }}</span>
+                      }
+                    </span>
+                  }
+                  @if (r.note) {
+                    <span class="note">{{ r.note }}</span>
+                  }
+                  @if (clipIds().has(r.id) || r.hasClip) {
+                    <button class="thumb" type="button" (click)="openClip(r)" [disabled]="opening() === r.id">
+                      @if (posters()[r.id]; as src) {
+                        <img [src]="src" alt="" />
+                      }
+                      <span>{{ opening() === r.id ? 'Downloading clip…' : 'Watch clip' }}</span>
+                    </button>
+                  }
+                  @if (editing() === r.id) {
+                    <app-jump-editor [jump]="r" (closed)="editing.set(null)" />
+                  }
+                </div>
+                <button class="btn ghost del" type="button" (click)="remove(r)" [attr.aria-label]="'Delete jump of ' + (r.heightCm | height)">
+                  Delete
                 </button>
-              }
-            </div>
-            <button class="btn ghost del" type="button" (click)="remove(r)" [attr.aria-label]="'Delete jump of ' + (r.heightCm | height)">
-              Delete
-            </button>
-          </li>
-        }
-      </ul>
+              </li>
+            }
+          </ul>
+        </section>
+      }
+      @if (sessionsAll().length > sessionsShown().length) {
+        <button class="btn" type="button" (click)="showCount.set(showCount() + 20)">Show older sessions</button>
+      }
     }
 
     @if (viewing(); as v) {
@@ -366,6 +455,109 @@ interface Metric {
         border-color: var(--blue);
       }
     }
+    .seg {
+      display: inline-flex;
+      border: 1.5px solid var(--line);
+      border-radius: 999px;
+      overflow: hidden;
+      margin-bottom: 4px;
+      button {
+        min-height: 32px;
+        padding: 0 14px;
+        border: 0;
+        background: var(--surface);
+        font-weight: 600;
+        font-size: 0.85rem;
+        cursor: pointer;
+        &.on {
+          background: var(--ink);
+          color: var(--paper);
+        }
+      }
+    }
+    .panel {
+      margin: 16px 0;
+      padding: 12px;
+      background: var(--surface);
+      border-radius: var(--r-lg);
+      h2 {
+        font-size: 1.15rem;
+        margin: 0 0 4px;
+      }
+      p {
+        margin: 0 0 6px;
+      }
+    }
+    .tag-insights {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      li {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 0 8px;
+        padding: 6px 0;
+        border-top: 1px solid var(--line);
+      }
+      .t {
+        font-weight: 600;
+      }
+      .num {
+        font-weight: 700;
+        &.up {
+          color: var(--ok);
+        }
+        &.down {
+          color: var(--red);
+        }
+      }
+      .small {
+        grid-column: 1 / -1;
+      }
+    }
+    .session {
+      margin-top: 18px;
+    }
+    .sess-head {
+      display: grid;
+      padding-bottom: 4px;
+      .when {
+        font-family: var(--display);
+        font-weight: 700;
+        font-size: 1.1rem;
+      }
+    }
+    .badge {
+      display: inline-block;
+      margin-left: 4px;
+      padding: 0 6px;
+      border-radius: 999px;
+      font-family: var(--body);
+      font-size: 0.7rem;
+      font-weight: 700;
+      vertical-align: middle;
+      &.pr {
+        background: var(--red);
+        color: #fff;
+      }
+    }
+    .warn-line {
+      color: var(--red);
+      font-weight: 600;
+    }
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 2px;
+    }
+    .tag {
+      padding: 0 8px;
+      border-radius: 999px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      font-size: 0.78rem;
+    }
     .toast {
       position: fixed;
       left: 16px;
@@ -493,7 +685,59 @@ export class History implements OnDestroy {
     return c && this.typesInUse().includes(c) ? c : (this.typesInUse()[0] ?? 'CMJ');
   });
 
-  protected readonly filtered = computed(() => this.store.sorted().filter((r) => r.type === this.type()));
+  protected readonly tagFilter = signal<string | null>(null);
+  /** All jumps of this type (ignores the tag filter). */
+  private readonly ofType = computed(() => this.store.sorted().filter((r) => r.type === this.type()));
+  protected readonly tagsInUse = computed(() => [...new Set(this.ofType().flatMap((r) => r.tags ?? []))].sort());
+  protected readonly filtered = computed(() => {
+    const t = this.tagFilter();
+    return t ? this.ofType().filter((r) => r.tags?.includes(t)) : this.ofType();
+  });
+
+  protected readonly editing = signal<string | null>(null);
+  protected readonly bySession = signal(true);
+  protected readonly showCount = signal(20);
+  private readonly scoreMode = computed(() => this.store.settings().sessionScore);
+
+  /** Newest session first, for the list. Scored on height. */
+  protected readonly sessionsAll = computed<Session[]>(() =>
+    [...groupSessions(this.filtered(), this.type(), 'heightCm', this.scoreMode())].reverse().map((s) => ({
+      ...s,
+      jumps: [...s.jumps].reverse(),
+    })),
+  );
+  protected readonly sessionsShown = computed(() => this.sessionsAll().slice(0, this.showCount()));
+
+  /** Jumps that were a personal record when they were set. */
+  protected readonly prIds = computed(() => {
+    const all = this.ofType();
+    return new Set(all.filter((r) => isPersonalRecord(all, r)).map((r) => r.id));
+  });
+
+  protected readonly tagInsights = computed(() => tagStats(this.ofType()).slice(0, 6));
+  protected readonly validation = computed(() => agreement(this.ofType()));
+  protected abs = Math.abs;
+
+  protected bestHopRsi(r: JumpRecord) {
+    return Math.max(...(r.hops ?? []).map((h) => h.rsi ?? 0));
+  }
+
+  /** Session view applies to metrics that have a "best". */
+  private readonly insightMetric = computed<InsightMetric | null>(() => {
+    const k = this.metric().key;
+    return k === 'height' ? 'heightCm' : k === 'rsi' ? 'rsi' : k === 'rsiMod' ? 'rsiMod' : null;
+  });
+  protected readonly canGroup = computed(() => this.insightMetric() !== null && this.sessionsAll().length < this.filtered().length);
+
+  /** Baseline ± smallest worthwhile change, in chart units. */
+  protected readonly normalBand = computed(() => {
+    const m = this.insightMetric();
+    if (!m || !this.bySession()) return null;
+    const r = readiness(groupSessions(this.filtered(), this.type(), m, this.scoreMode()));
+    if (!r) return null;
+    const conv = (v: number) => (m === 'heightCm' ? toUnits(v, this.units()) : v);
+    return { lo: conv(r.baseline - r.swc), hi: conv(r.baseline + r.swc) };
+  });
   protected readonly best = computed(() => maxBy(this.filtered(), (r) => r.heightCm));
   protected readonly recentAvg = computed(() => {
     const last = this.filtered().slice(0, 5);
@@ -536,6 +780,15 @@ export class History implements OnDestroy {
   protected readonly chartPoints = computed<ChartPoint[]>(() => {
     const m = this.metric();
     const u = this.units();
+    const im = this.insightMetric();
+    if (im && this.bySession() && this.canGroup()) {
+      return groupSessions(this.filtered(), this.type(), im, this.scoreMode()).map((s) => {
+        const value = m.get({ ...s.jumps[0], heightCm: s.score, rsi: s.score, rsiMod: s.score })!;
+        const text =
+          m.key === 'height' ? `${formatNumber(value, 1)} ${u}` : `${m.name} ${formatNumber(value, 2)}`;
+        return { id: s.id, date: s.start, value, text: `Session: ${text} (${s.jumps.length} jumps)` };
+      });
+    }
     return this.filtered()
       .filter((r) => m.get(r) !== undefined)
       .map((r) => {

@@ -35,6 +35,7 @@ import { Avatar } from './shared/avatar';
     <nav class="tabs" aria-label="Sections">
       <a routerLink="/measure" routerLinkActive="on">Measure</a>
       <a routerLink="/history" routerLinkActive="on">History</a>
+      <a routerLink="/train" routerLinkActive="on">Train</a>
       <a routerLink="/setup" routerLinkActive="on">Setup</a>
     </nav>
   `,
@@ -108,7 +109,7 @@ import { Avatar } from './shared/avatar';
       position: fixed;
       inset: auto 0 0 0;
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(4, 1fr);
       background: var(--surface);
       border-top: 1.5px solid var(--line);
       padding-bottom: env(safe-area-inset-bottom);

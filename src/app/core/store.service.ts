@@ -1,5 +1,8 @@
 import { Injectable, computed, effect, signal } from '@angular/core';
 import { JumpRecord, JumpType, Units } from './jump-math';
+import type { ActivePlan } from './plans';
+import type { SessionScoreMode } from './insights';
+import type { Sex } from './norms';
 
 export interface Settings {
   massKg: number | null;
@@ -9,12 +12,50 @@ export interface Settings {
   boxCm: number | null;
   /** Standing height, used to check the frame rate from the jump's motion. */
   statureCm: number | null;
+  /** For reference ranges. */
+  sex: Sex | null;
+  /** How a session is scored: its best jump, or the mean of its best three. */
+  sessionScore: SessionScoreMode;
+  /** Jump type used for the readiness check. */
+  readinessType: JumpType;
+  goals: Goal[];
+  plan: ActivePlan | null;
+  /** Tags offered when saving, on top of the built-in ones. */
+  customTags: string[];
+  /** Vibrate / beep when a jump is detected. */
+  haptics: boolean;
+  /** First-run guide has been seen. */
+  onboarded: boolean;
+}
+
+export interface Goal {
+  id: string;
+  type: JumpType;
+  metric: 'heightCm' | 'rsi' | 'rsiMod';
+  target: number;
+  /** ISO date, optional. */
+  by: string | null;
+  createdAt: string;
 }
 
 const HISTORY_KEY = 'jump-meter.history.v1';
 const SETTINGS_KEY = 'jump-meter.settings.v1';
 
-const DEFAULT_SETTINGS: Settings = { massKg: null, defaultType: 'CMJ', units: 'cm', boxCm: null, statureCm: null };
+const DEFAULT_SETTINGS: Settings = {
+  massKg: null,
+  defaultType: 'CMJ',
+  units: 'cm',
+  boxCm: null,
+  statureCm: null,
+  sex: null,
+  sessionScore: 'best',
+  readinessType: 'CMJ',
+  goals: [],
+  plan: null,
+  customTags: [],
+  haptics: true,
+  onboarded: false,
+};
 
 function load<T>(key: string, fallback: T): T {
   try {
@@ -99,7 +140,12 @@ export class StoreService {
 
   /** User edit: change a jump's date and queue it for upload. */
   setDate(id: string, iso: string) {
-    this.patch(id, { date: iso, synced: false });
+    this.edit(id, { date: iso });
+  }
+
+  /** User edit of any fields; queues the jump for upload. */
+  edit(id: string, patch: Partial<JumpRecord>) {
+    this.patch(id, { ...patch, synced: false });
     const r = this.history().find((x) => x.id === id);
     if (r) this.listeners.forEach((l) => l({ kind: 'restore', record: r }));
   }

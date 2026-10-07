@@ -49,6 +49,9 @@ export function fromUnits(value: number, units: Units): number {
 }
 
 export type JumpType =
+  | 'Repeated jumps'
+  | 'Broad jump'
+  | 'Jump & reach'
   | 'CMJ'
   | 'CMJ + arms'
   | 'Squat jump'
@@ -66,6 +69,9 @@ export const JUMP_TYPES: JumpType[] = [
   'Single-leg L',
   'Single-leg R',
   'Approach',
+  'Repeated jumps',
+  'Broad jump',
+  'Jump & reach',
   'Other',
 ];
 
@@ -77,10 +83,56 @@ export const JUMP_TYPE_HINT: Record<JumpType, string> = {
   'Single-leg L': 'Countermovement jump off the left leg only.',
   'Single-leg R': 'Countermovement jump off the right leg only.',
   Approach: 'Run-up jump, like a basketball or volleyball take-off.',
+  'Repeated jumps': '10/5 test or pogo hops: bounce off the ground as quickly and high as you can, several times in a row.',
+  'Broad jump': 'Standing long jump. Needs a known length in the video (e.g. a 1 m tape on the floor) to measure distance.',
+  'Jump & reach': 'Reach as high as you can, then jump and touch the highest point. Needs a known length in the video.',
   Other: 'Anything else.',
 };
 
 export const isDropJump = (t: JumpType) => t === 'Drop jump';
+export const isRepeated = (t: JumpType) => t === 'Repeated jumps';
+/** Types measured by distance on the video rather than flight time. */
+export const isDistanceType = (t: JumpType) => t === 'Broad jump' || t === 'Jump & reach';
+
+export interface PostureCheck {
+  /** Knee angle (degrees, 180 = straight) at take-off and at touchdown. */
+  kneeTakeoff: number;
+  kneeLanding: number;
+  hipTakeoff: number;
+  hipLanding: number;
+  /** Landing was noticeably more bent than take-off. */
+  flagged: boolean;
+  /** Rough height inflation from the extra flight time, cm. */
+  inflationCm: number;
+}
+
+export interface Confidence {
+  level: 'high' | 'medium' | 'low';
+  score: number; // 0–100
+  reasons: string[];
+}
+
+export interface Kinematics {
+  /** How far the hips dropped in the countermovement, cm. */
+  depthCm: number | null;
+  /** Unweighting + braking (downward phase), ms. */
+  eccentricMs: number | null;
+  /** Upward push to take-off, ms. */
+  concentricMs: number | null;
+  /** Take-off velocity from flight time, m/s. */
+  takeoffVelocity: number;
+  /** Peak hip velocity during the push, m/s (from the pose). */
+  peakVelocity: number | null;
+  /** Momentum at take-off, kg·m/s (needs body mass). */
+  momentum: number | null;
+}
+
+export interface Hop {
+  contactMs: number | null;
+  flightMs: number;
+  heightCm: number;
+  rsi: number | null;
+}
 
 export interface JumpRecord {
   id: string;
@@ -102,6 +154,26 @@ export interface JumpRecord {
   timeToTakeoffMs?: number;
   /** RSI-modified = height (m) / time to take-off (s). */
   rsiMod?: number;
+  /** Jumps done together share a session. */
+  sessionId?: string;
+  /** Context tags: shoes, surface, warm-up, sleep… */
+  tags?: string[];
+  /** Same jump measured by another device (contact mat, force plate…), for validation. */
+  reference?: { heightCm: number; device: string };
+  /** Landing technique check from the pose model. */
+  posture?: PostureCheck;
+  /** Arms swung during the jump (detected from the wrists). */
+  armSwing?: boolean;
+  /** How much to trust this result. */
+  confidence?: Confidence;
+  /** Movement phases estimated from the hip trajectory. */
+  kinematics?: Kinematics;
+  /** Repeated-jump tests (10/5, pogo): every hop in the clip. */
+  hops?: Hop[];
+  /** Broad jump distance. */
+  distanceCm?: number;
+  /** Jump-and-reach: reach height above standing reach. */
+  reachCm?: number;
   /** Local bookkeeping: saved to the cloud. */
   synced?: boolean;
   /** The cloud has a video clip for this jump. */

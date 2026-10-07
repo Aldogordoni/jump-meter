@@ -37,7 +37,13 @@ interface JumpRow {
   time_to_takeoff_ms: number | null;
   rsi_mod: number | null;
   has_clip: boolean;
+  session_id: string | null;
+  tags: string[] | null;
+  extra: Partial<JumpRecord> | null;
 }
+
+/** Fields kept in the flexible `extra` JSON column. */
+const EXTRA_KEYS = ['reference', 'posture', 'armSwing', 'confidence', 'kinematics', 'hops', 'distanceCm', 'reachCm'] as const;
 
 const DELETES_KEY = 'jump-meter.cloud.pending-deletes';
 const LAST_SYNC_KEY = 'jump-meter.cloud.last-sync';
@@ -608,6 +614,9 @@ function toRow(r: JumpRecord): Omit<JumpRow, 'has_clip'> & { updated_at: string 
     box_cm: r.boxCm ?? null,
     time_to_takeoff_ms: r.timeToTakeoffMs ?? null,
     rsi_mod: r.rsiMod ?? null,
+    session_id: r.sessionId ?? null,
+    tags: r.tags ?? [],
+    extra: Object.fromEntries(EXTRA_KEYS.filter((k) => r[k] !== undefined).map((k) => [k, r[k]])),
     updated_at: new Date().toISOString(),
   };
 }
@@ -630,6 +639,9 @@ function fromRow(r: JumpRow): JumpRecord {
     timeToTakeoffMs: opt(r.time_to_takeoff_ms),
     rsiMod: opt(r.rsi_mod),
     hasClip: r.has_clip,
+    sessionId: r.session_id ?? undefined,
+    tags: r.tags?.length ? r.tags : undefined,
+    ...(r.extra ?? {}),
   };
 }
 

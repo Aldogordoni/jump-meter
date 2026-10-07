@@ -339,9 +339,32 @@
             </span>
           </div>
           <div class="field">
-            <label for="note">Note</label>
-            <input id="note" type="text" [ngModel]="note()" (ngModelChange)="note.set($event)" placeholder="e.g. after warm-up, trainers" />
+            <span class="lbl">Tags</span>
+            <app-tag-picker [selected]="tags()" (changed)="tags.set($event)" />
+            <span class="hint">Tags let History show what helps you jump higher.</span>
           </div>
+          <div class="field">
+            <label for="note">Note</label>
+            <input id="note" type="text" [ngModel]="note()" (ngModelChange)="note.set($event)" placeholder="Anything else worth remembering" />
+          </div>
+          @if (!refOpen()) {
+            <button class="link-btn" type="button" (click)="refOpen.set(true)">Measured this jump with another device too?</button>
+          } @else {
+            <fieldset class="ref">
+              <legend>Another device's result</legend>
+              <div class="ref-row">
+                <div class="field">
+                  <label for="refv">Height ({{ units() }})</label>
+                  <input id="refv" type="number" inputmode="decimal" step="any" min="0" [ngModel]="refValue()" (ngModelChange)="refValue.set($event)" />
+                </div>
+                <div class="field">
+                  <label for="refd">Device</label>
+                  <input id="refd" type="text" maxlength="40" placeholder="e.g. contact mat" [ngModel]="refDevice()" (ngModelChange)="refDevice.set($event)" />
+                </div>
+              </div>
+              <span class="hint">History will show how closely Jump Meter agrees with it.</span>
+            </fieldset>
+          }
           @if (!savedId()) {
             <label class="check-row">
               <input type="checkbox" [ngModel]="saveClip()" (ngModelChange)="saveClip.set($event)" />
@@ -349,6 +372,22 @@
             </label>
           }
           @if (savedId()) {
+            @if (celebration(); as c) {
+              @if (c.pr) {
+                <div class="celebrate" role="status">
+                  <strong>New personal record!</strong>
+                  @if (c.gainCm !== null) {
+                    <span>+{{ c.gainCm | height: 'full' : 1 }} on your previous best {{ type() }}.</span>
+                  }
+                </div>
+              }
+              @for (m of c.milestones; track m) {
+                <div class="celebrate milestone" role="status"><strong>Milestone:</strong> your first {{ type() }} over {{ m }} {{ units() }}.</div>
+              }
+              @if (c.readiness) {
+                <p class="small">Readiness: {{ c.readiness }}. <a routerLink="/train">More on Train</a></p>
+              }
+            }
             <p class="saved" role="status">
               @if (clipProgress() !== null) {
                 Saved. Making the video clip… {{ clipProgress() }}%
