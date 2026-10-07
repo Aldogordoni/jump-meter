@@ -2,8 +2,10 @@ import { Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { StoreService } from '../core/store.service';
-import { JUMP_TYPES, fromUnits, toUnits } from '../core/jump-math';
-import { requestPersistentStorage } from '../core/clip-store';
+import { JUMP_TYPES, JumpRecord, fromUnits, toUnits } from '../core/jump-math';
+import { clipStore, requestPersistentStorage } from '../core/clip-store';
+import { CloudService } from '../core/cloud.service';
+import { BackupProgress, buildBackup, readBackup, restoreClips } from '../core/backup';
 
 @Component({
   selector: 'app-setup',
@@ -142,13 +144,25 @@ import { requestPersistentStorage } from '../core/clip-store';
       @if (usage(); as u) {
         <p class="small muted">Using {{ u }} of storage on this device.</p>
       }
+      <h3>Backup</h3>
+      <p class="small">
+        One file with every jump, your settings and all your video clips (including ones only in the cloud). Import it
+        on any phone to get everything back.
+      </p>
+      <label class="check">
+        <input type="checkbox" [checked]="includeClips()" (change)="includeClips.set($any($event.target).checked)" />
+        Include video clips
+      </label>
       <div class="row">
-        <button class="btn" type="button" (click)="export()" [disabled]="!store.history().length">Export backup</button>
-        <label class="btn">
+        <button class="btn" type="button" (click)="export()" [disabled]="!store.history().length || working()">Export backup</button>
+        <label class="btn" [class.disabled]="working()">
           Import backup
-          <input type="file" accept="application/json,.json" (change)="import($event)" class="sr-only" />
+          <input type="file" accept=".zip,.json,application/zip,application/json" (change)="import($event)" class="sr-only" [disabled]="working()" />
         </label>
       </div>
+      @if (progress(); as p) {
+        <p class="small muted" role="status">{{ p }}</p>
+      }
       @if (message()) {
         <p role="status" class="msg">{{ message() }}</p>
       }
@@ -207,6 +221,17 @@ import { requestPersistentStorage } from '../core/clip-store';
     .small {
       font-size: 0.85rem;
     }
+    .check {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-height: 44px;
+      margin-bottom: 4px;
+    }
+    .btn.disabled {
+      opacity: 0.45;
+      pointer-events: none;
+    }
     .msg {
       margin-top: 10px;
       font-weight: 600;
@@ -220,6 +245,7 @@ import { requestPersistentStorage } from '../core/clip-store';
 })
 export class Setup {
   protected readonly store = inject(StoreService);
+  private readonly cloud = inject(CloudService);
   protected readonly types = JUMP_TYPES;
   protected readonly message = signal('');
   protected readonly persisted = signal<boolean | null>(null);
@@ -244,14 +270,62 @@ export class Setup {
     this.store.updateSettings({ statureCm: cm && cm > 100 && cm < 250 ? Math.round(cm) : null });
   }
 
-  protected export() {
-    const blob = new Blob([this.store.exportJson()], { type: 'application/json' });
+  protected readonly includeClips = signal(true);
+  protected readonly working = signal(false);
+  protected readonly progress = signal<string | null>(null);
+
+  private progressText(p: BackupProgress) {
+    switch (p.stage) {
+      case 'collecting':
+        return `Gathering clips: ${p.done + 1} of ${p.total} jumps…`;
+      case 'packing':
+        return 'Packing the backup…';
+      case 'reading':
+        return `Reading the backup: ${Math.round((100 * p.done) / Math.max(1, p.total))}%`;
+      case 'restoring':
+        return `Restoring clips: ${p.done + 1} of ${p.total}…`;
+    }
+  }
+
+  protected async export() {
+    this.working.set(true);
+    this.message.set('');
+    try {
+      const withClips = this.includeClips();
+      const getClip = withClips
+        ? async (r: JumpRecord) =>
+            (await clipStore.get(r.id).catch(() => undefined)) ??
+            (r.hasClip && this.cloud.signedIn() ? await this.cloud.fetchClip(r.id) : undefined)
+        : null;
+      const { blob, clipCount } = await buildBackup(this.store.sorted(), this.store.settings(), getClip, (p) =>
+        this.progress.set(this.progressText(p)),
+      );
+      const name = `jump-meter-backup-${new Date().toISOString().slice(0, 10)}.zip`;
+      const file = new File([blob], name, { type: 'application/zip' });
+      // On phones the share sheet is the friendliest way to save a big file (Save to Files, AirDrop…).
+      if (navigator.canShare?.({ files: [file] }) && blob.size > 20 * 1024 * 1024) {
+        await navigator.share({ files: [file], title: 'Jump Meter backup' }).catch(() => this.download(file));
+      } else {
+        this.download(file);
+      }
+      const mb = (blob.size / 1024 / 1024).toFixed(1);
+      this.message.set(
+        `Backup ready: ${this.store.history().length} jumps${withClips ? ` and ${clipCount} clip${clipCount === 1 ? '' : 's'}` : ''}, ${mb} MB.`,
+      );
+    } catch (e) {
+      this.message.set(`Couldn't make the backup. ${(e as Error).message}`);
+    } finally {
+      this.working.set(false);
+      this.progress.set(null);
+    }
+  }
+
+  private download(file: File) {
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `jump-meter-${new Date().toISOString().slice(0, 10)}.json`;
+    a.href = URL.createObjectURL(file);
+    a.download = file.name;
     a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    this.message.set('Backup downloaded.');
+    setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
   }
 
   protected async import(ev: Event) {
@@ -259,11 +333,27 @@ export class Setup {
     const file = input.files?.[0];
     input.value = '';
     if (!file) return;
+    this.working.set(true);
+    this.message.set('');
     try {
-      const n = this.store.importJson(await file.text());
-      this.message.set(n ? `Imported ${n} jump${n === 1 ? '' : 's'}.` : 'Nothing new in that file: all those jumps are already here.');
+      const backup = await readBackup(file, (p) => this.progress.set(this.progressText(p)));
+      const jumps = this.store.importRecords(backup.history);
+      const clips = await restoreClips(backup.clips, (p) => this.progress.set(this.progressText(p)));
+      this.cloud.schedule(0);
+      const parts = [
+        jumps ? `${jumps} jump${jumps === 1 ? '' : 's'}` : null,
+        clips ? `${clips} clip${clips === 1 ? '' : 's'}` : null,
+      ].filter(Boolean);
+      this.message.set(
+        parts.length
+          ? `Imported ${parts.join(' and ')}.${this.cloud.signedIn() ? ' Uploading to your account…' : ''}`
+          : 'Nothing new in that file: everything in it is already here.',
+      );
     } catch (e) {
       this.message.set(`Couldn't import that file. ${(e as Error).message}`);
+    } finally {
+      this.working.set(false);
+      this.progress.set(null);
     }
   }
 }

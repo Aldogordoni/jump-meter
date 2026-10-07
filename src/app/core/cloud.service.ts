@@ -7,6 +7,13 @@ import { clipStore, StoredClip } from './clip-store';
 
 export type SyncStatus = 'off' | 'idle' | 'syncing' | 'offline' | 'error';
 
+export interface Profile {
+  username: string | null;
+  displayName: string | null;
+  /** Data URL of the profile picture (cached on the device). */
+  avatarUrl: string | null;
+}
+
 export interface AllowedEmail {
   email: string;
   is_admin: boolean;
@@ -55,6 +62,13 @@ export class CloudService {
   readonly error = signal<string | null>(null);
   readonly lastSync = signal<string | null>(readLocal(LAST_SYNC_KEY));
   readonly signedIn = computed(() => !!this.user() && this.access() === 'allowed');
+  /** Public-facing profile: username, display name and picture. */
+  readonly profile = signal<Profile>({ username: null, displayName: null, avatarUrl: null });
+  /** Name to show in the app: display name, then @username, then email. */
+  readonly shownName = computed(() => {
+    const p = this.profile();
+    return p.displayName || (p.username ? '@' + p.username : (this.user()?.email ?? ''));
+  });
 
   private client?: Promise<SupabaseClient>;
   private syncing = false;
@@ -156,6 +170,92 @@ export class CloudService {
     if (data.user) await this.onSignedIn(data.user);
   }
 
+  /** Sign in with email or username, plus password. */
+  async signInWithPassword(identifier: string, password: string): Promise<void> {
+    const sb = await this.sb();
+    // "@name" is a username; only "name@domain" is an email.
+    const id = identifier.trim().replace(/^@+/, '');
+    if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(id)) {
+      const { data, error } = await sb.auth.signInWithPassword({ email: normaliseEmail(id), password });
+      if (error) throw new Error(friendlyAuthError(error.message));
+      if (data.user) await this.onSignedIn(data.user);
+      return;
+    }
+    // Usernames are resolved on the server so emails never reach the browser.
+    let res: Response;
+    try {
+      res = await fetch(`${SUPABASE_URL}/functions/v1/username-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY },
+        body: JSON.stringify({ username: id.toLowerCase(), password }),
+      });
+    } catch {
+      throw new Error("Couldn't reach the server. Check your connection.");
+    }
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 429) throw new Error('Too many wrong attempts for this username. Try again in 15 minutes, or sign in with an email code.');
+    if (!res.ok || !body.access_token) throw new Error('Wrong username or password.');
+    const { data, error } = await sb.auth.setSession({ access_token: body.access_token, refresh_token: body.refresh_token });
+    if (error) throw new Error(friendlyAuthError(error.message));
+    if (data.user) await this.onSignedIn(data.user);
+  }
+
+  /** Set or change the password for the signed-in account. */
+  async setPassword(password: string): Promise<void> {
+    const sb = await this.sb();
+    const { error } = await sb.auth.updateUser({ password });
+    if (error) throw new Error(friendlyAuthError(error.message));
+  }
+
+  async saveProfile(changes: { username: string; displayName: string }): Promise<void> {
+    const u = this.user();
+    if (!u) return;
+    const username = changes.username.trim().replace(/^@/, '').toLowerCase() || null;
+    if (username && !/^[a-z0-9_.]{3,24}$/.test(username)) {
+      throw new Error('Usernames are 3–24 characters: lowercase letters, numbers, dots and underscores.');
+    }
+    const displayName = changes.displayName.trim().slice(0, 60) || null;
+    const sb = await this.sb();
+    const { error } = await sb
+      .from('profiles')
+      .upsert({ user_id: u.id, username, display_name: displayName, updated_at: new Date().toISOString() });
+    if (error) {
+      if (/duplicate key|profiles_username_key/.test(error.message)) throw new Error('That username is taken.');
+      throw new Error(friendlyDbError(error.message));
+    }
+    this.profile.update((p) => ({ ...p, username, displayName }));
+  }
+
+  /** Resize to a 256 px square JPEG and store it with the user's files. */
+  async setAvatar(file: File): Promise<void> {
+    const u = this.user();
+    if (!u) return;
+    const blob = await squareJpeg(file, 256);
+    const sb = await this.sb();
+    const path = `${u.id}/avatar.jpg`;
+    const up = await sb.storage.from(BUCKET).upload(path, blob, { contentType: 'image/jpeg', upsert: true });
+    if (up.error) throw new Error(up.error.message);
+    const { error } = await sb.from('profiles').upsert({ user_id: u.id, avatar_path: path, updated_at: new Date().toISOString() });
+    if (error) throw new Error(friendlyDbError(error.message));
+    const url = await blobToDataUrl(blob);
+    writeLocal(avatarKey(u.id), url);
+    this.profile.update((p) => ({ ...p, avatarUrl: url }));
+  }
+
+  async removeAvatar(): Promise<void> {
+    const u = this.user();
+    if (!u) return;
+    const sb = await this.sb();
+    await sb.storage.from(BUCKET).remove([`${u.id}/avatar.jpg`]);
+    await sb.from('profiles').upsert({ user_id: u.id, avatar_path: null, updated_at: new Date().toISOString() });
+    try {
+      localStorage.removeItem(avatarKey(u.id));
+    } catch {
+      /* ignore */
+    }
+    this.profile.update((p) => ({ ...p, avatarUrl: null }));
+  }
+
   async signOut(removeLocal: boolean) {
     const sb = await this.sb();
     await this.syncNow().catch(() => undefined);
@@ -170,6 +270,7 @@ export class CloudService {
 
   private async onSignedIn(user: User) {
     this.user.set({ id: user.id, email: user.email ?? '' });
+    this.profile.update((p) => ({ ...p, avatarUrl: readLocal(avatarKey(user.id)) }));
     this.error.set(null);
     const sb = await this.sb();
     const [allowed, admin] = await Promise.all([sb.rpc('is_allowed'), sb.rpc('is_admin')]);
@@ -186,6 +287,7 @@ export class CloudService {
 
   private onSignedOut() {
     this.user.set(null);
+    this.profile.set({ username: null, displayName: null, avatarUrl: null });
     this.access.set('unknown');
     this.isAdmin.set(false);
     this.status.set('off');
@@ -341,8 +443,21 @@ export class CloudService {
 
   private async pullSettingsOnce(sb: SupabaseClient, uid: string) {
     if (this.settingsReady) return;
-    const { data, error } = await sb.from('profiles').select('settings').eq('user_id', uid).maybeSingle();
+    const { data, error } = await sb
+      .from('profiles')
+      .select('settings, username, display_name, avatar_path')
+      .eq('user_id', uid)
+      .maybeSingle();
     if (error) throw error;
+    this.profile.update((p) => ({ ...p, username: data?.username ?? null, displayName: data?.display_name ?? null }));
+    if (data?.avatar_path && !readLocal(avatarKey(uid))) {
+      const { data: img } = await sb.storage.from(BUCKET).download(data.avatar_path);
+      if (img) {
+        const url = await blobToDataUrl(img);
+        writeLocal(avatarKey(uid), url);
+        this.profile.update((p) => ({ ...p, avatarUrl: url }));
+      }
+    }
     if (data?.settings && Object.keys(data.settings).length) {
       this.store.updateSettings(data.settings as Partial<Settings>);
     } else {
@@ -522,6 +637,30 @@ function appUrl() {
   return new URL('.', document.baseURI).href;
 }
 
+const avatarKey = (uid: string) => `jump-meter.avatar.${uid}`;
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+/** Centre-crop to a square and scale down, so profile pictures stay tiny. */
+async function squareJpeg(file: File, size: number): Promise<Blob> {
+  const bmp = await createImageBitmap(file);
+  const side = Math.min(bmp.width, bmp.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  canvas.getContext('2d')!.drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size);
+  bmp.close();
+  return new Promise((resolve, reject) =>
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Couldn't read that image."))), 'image/jpeg', 0.85),
+  );
+}
+
 function normaliseEmail(e: string) {
   return e.trim().toLowerCase();
 }
@@ -531,6 +670,10 @@ function friendlyAuthError(msg: string): string {
     return "This email isn't approved yet. Ask the admin to add it, then try again.";
   }
   if (/rate limit|too many|seconds/i.test(msg)) return 'Too many codes requested. Wait a minute and try again.';
+  if (/Invalid login credentials/i.test(msg)) return 'Wrong email or password.';
+  if (/Email not confirmed/i.test(msg)) return 'Confirm your email first: sign in with an email code once.';
+  if (/should be different/i.test(msg)) return 'Choose a password you haven\'t used for this account before.';
+  if (/Password should be|weak/i.test(msg)) return 'That password is too weak. Use at least 8 characters with letters and numbers.';
   if (/expired|invalid/i.test(msg)) return "That code didn't work. It may have expired. Request a new one.";
   if (/fetch|network/i.test(msg)) return "Couldn't reach the server. Check your connection.";
   return msg;

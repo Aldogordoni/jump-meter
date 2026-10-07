@@ -33,6 +33,7 @@
     "@fontsource/barlow-condensed": "^5.3.0",
     "@mediapipe/tasks-vision": "^1.0.1",
     "@supabase/supabase-js": "^2.117.2",
+    "fflate": "^0.8.3",
     "mp4-muxer": "^5.2.2",
     "mp4box": "^2.4.1",
     "rxjs": "~7.8.0",

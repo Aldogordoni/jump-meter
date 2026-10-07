@@ -2,10 +2,11 @@ import { Component, inject } from '@angular/core';
 import { SwUpdate } from '@angular/service-worker';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { CloudService } from './core/cloud.service';
+import { Avatar } from './shared/avatar';
 
 @Component({
   selector: 'app-root',
-  imports: [RouterOutlet, RouterLink, RouterLinkActive],
+  imports: [RouterOutlet, RouterLink, RouterLinkActive, Avatar],
   template: `
     <header class="top">
       <a routerLink="/measure" class="mark" aria-label="Jump Meter home">
@@ -18,10 +19,10 @@ import { CloudService } from './core/cloud.service';
         Jump Meter
       </a>
       @if (cloud.configured) {
-        <a routerLink="/account" class="acct" [class]="'acct ' + cloud.status()" [attr.aria-label]="accountLabel()">
-          @if (cloud.user(); as u) {
+        <a routerLink="/account" class="acct" [class]="'acct ' + cloud.status() + (cloud.user() ? ' in' : '')" [attr.aria-label]="accountLabel()">
+          @if (cloud.user()) {
             <span class="dot" aria-hidden="true"></span>
-            <span class="initial">{{ u.email.charAt(0).toUpperCase() }}</span>
+            <app-avatar [src]="cloud.profile().avatarUrl" [name]="cloud.shownName()" [size]="30" />
           } @else {
             Sign in
           }
@@ -59,6 +60,9 @@ import { CloudService } from './core/cloud.service';
       gap: 6px;
       min-height: 40px;
       padding: 0 12px;
+      &.in {
+        padding: 0 4px 0 12px;
+      }
       border: 1.5px solid var(--line);
       border-radius: 999px;
       color: var(--ink);
@@ -134,7 +138,7 @@ export class App {
     const u = this.cloud.user();
     if (!u) return 'Sign in to sync your jumps';
     const s = this.cloud.status();
-    return `Account: ${u.email}, ${s === 'idle' ? 'synced' : s}`;
+    return `Account: ${this.cloud.shownName()}, ${s === 'idle' ? 'synced' : s}`;
   }
 
   constructor() {

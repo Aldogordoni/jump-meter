@@ -74,6 +74,8 @@ Heights display in **cm or inches** (Setup, or the toggle on the result). They'r
 - Flight time, take-off velocity, timing uncertainty and peak power (Sayers equation, if you add your body mass)
 - History per jump type, with a progress chart and JSON export/import (stored in `localStorage`)
 - Saves a short slow-motion **video clip** of each jump (key frames labelled, result captioned) to view, download or share
+- **Full backups**: one `.zip` with every jump, the settings and all clips (`backup.json`, `clips/`, `posters/`). Clips that
+  only exist in the cloud are included, and importing restores everything on any device
 - Installable PWA that works offline after first use
 
 ## Cloud sync and privacy
@@ -86,7 +88,11 @@ adds a long-term cloud copy in **Supabase** (EU region).
   removing an email cuts off access immediately. Admins manage the list in the app under **Account → Manage approved
   emails**.
 - **Own data only.** Row-level security limits every row and file to its owner (`clips/<user id>/…`).
-- **Passwordless.** Users sign in with a 6-digit code sent by email.
+- **Sign-in.** Users sign in with an email code, or with **email or username plus password**. Accounts are always created
+  with an email code first, which proves the email and checks the whitelist. A username sign-in goes through the
+  `username-login` edge function (`supabase/functions/`), so emails are never exposed to the browser, and 5 wrong
+  passwords lock that username for 15 minutes.
+- **Profile.** Display name, unique username and a profile picture (a 256 px JPEG stored with the user's files).
 - **Deletable.** Users can delete all their cloud data from the Account page.
 - The page's Content Security Policy only allows network requests to the app itself, Supabase, and Google's model CDN.
 
@@ -101,6 +107,8 @@ adds a long-term cloud copy in **Supabase** (EU region).
 
 Supabase's built-in email sender only allows a few emails per hour. For more than a handful of users, add your own SMTP
 under Authentication → SMTP Settings.
+
+See [ROADMAP.md](ROADMAP.md) for what's next.
 
 ## Development
 

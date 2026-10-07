@@ -132,11 +132,17 @@ export class StoreService {
     const data = JSON.parse(text);
     const incoming: JumpRecord[] = Array.isArray(data) ? data : data.history;
     if (!Array.isArray(incoming)) throw new Error('No jump history found in that file.');
+    return this.importRecords(incoming);
+  }
+
+  /** Add jumps from a backup that aren't here yet; returns how many were added. */
+  importRecords(incoming: JumpRecord[]): number {
     const known = new Set(this.history().map((r) => r.id));
     const fresh = incoming.filter(
       (r) => r && typeof r.heightCm === 'number' && typeof r.date === 'string' && !known.has(r.id),
     );
     this.history.update((h) => [...h, ...fresh.map((r) => ({ ...r, synced: false, hasClip: false }))]);
+    fresh.forEach((r) => this.listeners.forEach((l) => l({ kind: 'add', record: r })));
     return fresh.length;
   }
 }
