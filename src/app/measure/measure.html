@@ -35,6 +35,7 @@
   </section>
 } @else {
   <section class="player">
+    <h1 class="sr-only">Measure a jump</h1>
     <div class="file-row">
       <span class="fname" [title]="fileName()">{{ fileName() }}</span>
       <button class="btn ghost" type="button" (click)="reset()">Load another</button>
@@ -250,6 +251,7 @@
         }
       </div>
 
+      <h2 class="sr-only">Mark the frames</h2>
       <div class="marks" [class.three]="markDefs().length === 3">
         @for (d of markDefs(); track d.key) {
           <div class="mark-card" [class.set]="markAt(d.key) !== null">
@@ -589,6 +591,9 @@
                 Saved. <a routerLink="/history">See history</a>
               }
             </p>
+            <button class="btn" type="button" (click)="shareCard()" [disabled]="!card()">
+              {{ card() ? 'Share card' : 'Making share card…' }}
+            </button>
             @if (clipError()) {
               <p class="warn">{{ clipError() }}</p>
             }

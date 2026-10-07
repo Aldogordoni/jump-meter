@@ -6,7 +6,7 @@
  * Uses WebCodecs VideoEncoder + mp4-muxer; falls back to MediaRecorder.
  */
 import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
-import type { FrameSource } from './frame-source';
+import { openFrameSource, type FrameSource } from './frame-source';
 
 export interface ClipMark {
   frame: number;
@@ -67,6 +67,48 @@ export async function makeClip(opts: ClipOptions): Promise<{ video: Blob; poster
   poster ??= await toJpeg(canvas);
   const video = await encoder.finish();
   return { video, poster, mime: video.type };
+}
+
+/**
+ * Cut a saved clip down to [fromSec, toSec] (clip time). Re-encodes the frames as they are,
+ * captions included. Returns null when nothing would change.
+ */
+export async function trimClip(
+  video: Blob,
+  mime: string,
+  fromSec: number,
+  toSec: number,
+  onProgress?: (f: number) => void,
+): Promise<{ video: Blob; poster: Blob; mime: string } | null> {
+  const ext = mime.includes('webm') ? 'webm' : 'mp4';
+  const source = await openFrameSource(new File([video], `clip.${ext}`, { type: mime.split(';')[0] }), OUT_FPS);
+  try {
+    const t0 = source.timeAt(0);
+    const frames: number[] = [];
+    for (let i = 0; i < source.frameCount; i++) {
+      const t = source.timeAt(i) - t0;
+      if (t >= fromSec - 1e-3 && t <= toSec + 1e-3) frames.push(i);
+    }
+    if (frames.length < 2 || frames.length >= source.frameCount) return null;
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, MAX_SIDE / Math.max(source.width, source.height));
+    canvas.width = Math.max(2, Math.round((source.width * scale) / 2) * 2);
+    canvas.height = Math.max(2, Math.round((source.height * scale) / 2) * 2);
+    const ctx = canvas.getContext('2d')!;
+    const encoder = await createEncoder(canvas);
+    let poster: Blob | null = null;
+    let n = 0;
+    await source.scan(frames, MAX_SIDE, async (_i, img) => {
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      if (!poster) poster = await toJpeg(canvas);
+      await encoder.add(n++);
+      onProgress?.(n / frames.length);
+    });
+    const out = await encoder.finish();
+    return { video: out, poster: poster ?? (await toJpeg(canvas)), mime: out.type };
+  } finally {
+    source.dispose();
+  }
 }
 
 function drawFrame(

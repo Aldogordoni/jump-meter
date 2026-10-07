@@ -1,13 +1,16 @@
-import { Component, inject } from '@angular/core';
+import { Component, computed, inject } from '@angular/core';
 import { SwUpdate } from '@angular/service-worker';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { CloudService } from './core/cloud.service';
 import { Avatar } from './shared/avatar';
+import { Onboarding } from './shared/onboarding';
+import { StoreService } from './core/store.service';
 
 @Component({
   selector: 'app-root',
-  imports: [RouterOutlet, RouterLink, RouterLinkActive, Avatar],
+  imports: [RouterOutlet, RouterLink, RouterLinkActive, Avatar, Onboarding],
   template: `
+    <a class="skip" href="#main" (click)="skip($event)">Skip to content</a>
     <header class="top">
       <a routerLink="/measure" class="mark" aria-label="Jump Meter home">
         <svg viewBox="0 0 24 24" aria-hidden="true" width="22" height="22">
@@ -29,21 +32,40 @@ import { Avatar } from './shared/avatar';
         </a>
       }
     </header>
-    <main>
+    <main id="main" tabindex="-1">
       <router-outlet />
     </main>
     <nav class="tabs" aria-label="Sections">
-      <a routerLink="/measure" routerLinkActive="on">Measure</a>
-      <a routerLink="/history" routerLinkActive="on">History</a>
-      <a routerLink="/train" routerLinkActive="on">Train</a>
-      <a routerLink="/setup" routerLinkActive="on">Setup</a>
+      <a routerLink="/measure" routerLinkActive="on" ariaCurrentWhenActive="page">Measure</a>
+      <a routerLink="/history" routerLinkActive="on" ariaCurrentWhenActive="page">History</a>
+      <a routerLink="/train" routerLinkActive="on" ariaCurrentWhenActive="page">Train</a>
+      <a routerLink="/setup" routerLinkActive="on" ariaCurrentWhenActive="page">Setup</a>
     </nav>
+    @if (showOnboarding()) {
+      <app-onboarding />
+    }
   `,
   styles: `
     :host {
       display: block;
       min-height: 100dvh;
       padding-bottom: calc(64px + env(safe-area-inset-bottom));
+    }
+    .skip {
+      position: absolute;
+      left: 8px;
+      top: -60px;
+      z-index: 60;
+      padding: 8px 14px;
+      background: var(--ink);
+      color: var(--paper);
+      border-radius: var(--r-sm);
+      &:focus {
+        top: 8px;
+      }
+    }
+    main:focus {
+      outline: none;
     }
     .top {
       padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
@@ -135,6 +157,16 @@ import { Avatar } from './shared/avatar';
 })
 export class App {
   protected readonly cloud = inject(CloudService);
+  private readonly store = inject(StoreService);
+  /** First-run guide, for new users only (people with saved jumps already know the app). */
+  protected readonly showOnboarding = computed(
+    () => !this.store.settings().onboarded && !this.store.history().length && !location.hash.includes('access_token'),
+  );
+
+  protected skip(e: Event) {
+    e.preventDefault();
+    document.getElementById('main')?.focus();
+  }
   protected accountLabel() {
     const u = this.cloud.user();
     if (!u) return 'Sign in to sync your jumps';
@@ -143,6 +175,7 @@ export class App {
   }
 
   constructor() {
+    if (!this.store.settings().onboarded && this.store.history().length) this.store.updateSettings({ onboarded: true });
     this.cloud.init().catch((e) => console.warn('[jump-meter] cloud init failed', e));
     // Apply new versions straight away, so fixes reach the installed app without a double refresh.
     const sw = inject(SwUpdate);

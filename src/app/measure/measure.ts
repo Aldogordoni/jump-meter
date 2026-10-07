@@ -35,6 +35,9 @@ import { VaneGauge } from '../shared/vane-gauge';
 import { FootTrace } from '../shared/foot-trace';
 import { Recorder, Recording } from './recorder';
 import { TagPicker } from '../shared/tag-picker';
+import { FeedbackService } from '../core/feedback.service';
+import { cardDataFor, drawShareCard, shareImage } from '../core/share-card';
+import type { JumpRecord } from '../core/jump-math';
 import { groupSessions, isPersonalRecord, milestonesCrossed, readiness, sessionIdFor } from '../core/insights';
 import { uuid } from '../core/store.service';
 import {
@@ -92,6 +95,7 @@ export class Measure implements OnDestroy {
   protected readonly store = inject(StoreService);
   protected readonly cloud = inject(CloudService);
   private readonly pose = inject(PoseDetectorService);
+  private readonly feedback = inject(FeedbackService);
 
   protected readonly canvasRef = viewChild<ElementRef<HTMLCanvasElement>>('frame');
   protected readonly jumpTypes = JUMP_TYPES;
@@ -201,6 +205,8 @@ export class Measure implements OnDestroy {
   /** Shown after saving: new record, milestones, today's readiness. */
   protected readonly celebration = signal<{ pr: boolean; gainCm: number | null; milestones: number[]; readiness: string | null } | null>(null);
   protected readonly clipProgress = signal<number | null>(null);
+  /** Share card for the jump just saved, drawn ahead so sharing opens instantly. */
+  protected readonly card = signal<Blob | null>(null);
   protected readonly clipError = signal<string | null>(null);
 
   protected readonly units = computed(() => this.store.settings().units);
@@ -873,6 +879,7 @@ export class Measure implements OnDestroy {
     const fps = this.realFps();
     if (!this.source || !fps || this.detecting()) return;
     this.stopPlay();
+    this.feedback.unlock();
     this.abort = new AbortController();
     this.detecting.set(true);
     this.detectError.set(null);
@@ -888,6 +895,7 @@ export class Measure implements OnDestroy {
         this.marks.set({ ...NO_MARKS });
         this.exact.set({});
         this.method.set('auto');
+        this.feedback.cue('detected');
         this.goTo(Math.floor(r.events[0].takeoff));
         return;
       }
@@ -899,6 +907,7 @@ export class Measure implements OnDestroy {
       if (r.contactExact !== null) ex.contact = r.contactExact;
       this.exact.set(ex);
       this.method.set('auto');
+      this.feedback.cue('detected');
       this.goTo(r.firstAir);
     } catch (e) {
       if ((e as Error).name === 'AbortError') return;
@@ -977,8 +986,10 @@ export class Measure implements OnDestroy {
       milestones: byDistance ? [] : milestonesCrossed(all, rec, this.units()),
       readiness: status,
     });
-    if (pr) navigator.vibrate?.([30, 40, 30]);
-    if (this.saveClip()) this.storeClip(rec.id, byDistance ? dist! : r.heightCm, r.rsi, r.rsiMod);
+    this.feedback.cue(pr ? 'record' : 'saved');
+    this.card.set(null);
+    const clipDone = this.saveClip() ? this.storeClip(rec.id, byDistance ? dist! : r.heightCm, r.rsi, r.rsiMod) : Promise.resolve();
+    clipDone.then(() => this.prepareCard(rec, pr));
   }
 
   private async storeClip(id: string, heightCm: number, rsiValue: number | null, rsiModValue: number | null) {
@@ -1019,6 +1030,36 @@ export class Measure implements OnDestroy {
     } finally {
       this.clipProgress.set(null);
     }
+  }
+
+  private async prepareCard(rec: JumpRecord, pr: boolean) {
+    try {
+      // A clean frame just before take-off; the clip poster (with its caption bar) as a fallback.
+      let image: Blob | HTMLCanvasElement | null = null;
+      let captioned = false;
+      const ev = this.hopEvents()[0];
+      const f = this.marks().air ?? (ev ? Math.floor(ev.takeoff) : null);
+      if (this.source && f !== null) {
+        const c = document.createElement('canvas');
+        if (await this.source.show(Math.max(0, f - 1), c).catch(() => false)) image = c;
+      }
+      if (!image) {
+        image = (await clipStore.get(rec.id).catch(() => undefined))?.poster ?? null;
+        captioned = !!image;
+      }
+      const blob = await drawShareCard(
+        cardDataFor(rec, this.units(), { pr, name: this.cloud.user() ? this.cloud.shownName() : null, image, captioned }),
+      );
+      if (this.savedId() === rec.id) this.card.set(blob);
+    } catch (e) {
+      console.warn('[jump-meter] share card failed', e);
+    }
+  }
+
+  async shareCard() {
+    const blob = this.card();
+    const rec = this.store.history().find((r) => r.id === this.savedId());
+    if (blob && rec) await shareImage(blob, `jump-${rec.date.slice(0, 10)}.png`, 'My jump');
   }
 
   protected progressPct() {

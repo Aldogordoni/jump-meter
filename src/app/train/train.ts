@@ -271,7 +271,7 @@ const STATUS_TEXT = {
         padding: 2px 12px;
         border-radius: 999px;
         font-weight: 700;
-        color: #fff;
+        color: var(--on-accent);
         background: var(--ink-soft);
       }
       .big {
@@ -285,7 +285,7 @@ const STATUS_TEXT = {
         background: var(--blue);
       }
       &.slightly-down .pill {
-        background: #b7791f;
+        background: var(--warn);
       }
       &.fatigued .pill {
         background: var(--red);
@@ -308,7 +308,7 @@ const STATUS_TEXT = {
         background: var(--blue);
       }
       &.slightly-down {
-        background: #b7791f;
+        background: var(--warn);
       }
       &.fatigued {
         background: var(--red);

@@ -252,6 +252,22 @@ export class PoseDetectorService {
     return { trace, events, floor: coarse.floor };
   }
 
+  private liveCanvas?: HTMLCanvasElement;
+
+  /** One pose from the live camera preview (downscaled first, so it stays quick). */
+  async detectLive(video: HTMLVideoElement): Promise<FootSample | null> {
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    if (!w || !h) return null;
+    const { model } = await this.loadAny();
+    const s = Math.min(1, 256 / Math.max(w, h));
+    const c = (this.liveCanvas ??= document.createElement('canvas'));
+    c.width = Math.round(w * s);
+    c.height = Math.round(h * s);
+    c.getContext('2d')!.drawImage(video, 0, 0, c.width, c.height);
+    return toSample(0, model.detect(c).landmarks[0]);
+  }
+
   /** Run the pose model on specific frames (used for the frame-rate check after manual marking). */
   async samplePoses(source: FrameSource, frames: number[], signal?: AbortSignal): Promise<FootSample[]> {
     const { model } = await this.loadAny();

@@ -1,5 +1,17 @@
-import { Component, ElementRef, OnDestroy, OnInit, computed, output, signal, viewChild } from '@angular/core';
+import { Component, ElementRef, OnDestroy, OnInit, computed, inject, output, signal, viewChild } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
+import { PoseDetectorService } from '../core/pose-detector.service';
+import { FeedbackService } from '../core/feedback.service';
+import { framingOf, isStill, JumpWatcher } from '../core/framing';
+import { median, type FootSample, type Joint } from '../core/flight-detect';
+
+const BONES: [Joint, Joint][] = [
+  ['shoulderL', 'shoulderR'], ['hipL', 'hipR'], ['shoulderL', 'hipL'], ['shoulderR', 'hipR'],
+  ['hipL', 'kneeL'], ['kneeL', 'ankleL'], ['ankleL', 'heelL'], ['heelL', 'toeL'], ['ankleL', 'toeL'],
+  ['hipR', 'kneeR'], ['kneeR', 'ankleR'], ['ankleR', 'heelR'], ['heelR', 'toeR'], ['ankleR', 'toeR'],
+  ['shoulderL', 'wristL'], ['shoulderR', 'wristR'],
+];
+const HANDS_FREE_KEY = 'jump-meter.handsfree';
 
 export interface Recording {
   file: File;
@@ -26,14 +38,45 @@ interface CameraMode {
     <div class="rec">
       <div class="view">
         <video #preview playsinline muted autoplay></video>
+        @if (guide() && size(); as v) {
+          <svg class="guide" [attr.viewBox]="'0 0 ' + v.w + ' ' + v.h" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+            @if (pose()?.pts; as p) {
+              @for (b of bones; track $index) {
+                @if (p[b[0]] && p[b[1]] && p[b[0]]![2] > 0.4 && p[b[1]]![2] > 0.4) {
+                  <line
+                    [attr.x1]="p[b[0]]![0] * v.w" [attr.y1]="p[b[0]]![1] * v.h"
+                    [attr.x2]="p[b[1]]![0] * v.w" [attr.y2]="p[b[1]]![1] * v.h"
+                    [class.ok]="framing().ok" [attr.stroke-width]="v.w / 160"
+                  />
+                }
+              }
+            }
+            @if (floorY() !== null) {
+              <line class="floor" x1="0" [attr.x2]="v.w" [attr.y1]="floorY()! * v.h" [attr.y2]="floorY()! * v.h" [attr.stroke-width]="v.w / 200" />
+            }
+          </svg>
+        }
+        @if (countdown() !== null) {
+          <span class="count num" aria-live="assertive">{{ countdown() }}</span>
+        }
         @if (mode(); as m) {
           <span class="badge num">{{ m.height }}p, {{ m.fps | number: '1.0-0' }} fps</span>
         }
         @if (recording()) {
           <span class="live num"><span class="dot"></span>{{ seconds() }}s</span>
         }
-        @if (!recording() && ready()) {
-          <p class="tip">Phone on the floor, side-on, about 2 m away. Keep your whole body and the floor in shot.</p>
+        @if (ready()) {
+          <p class="tip" [class.good]="guide() && framing().ok" role="status" aria-live="polite">
+            @if (!guide()) {
+              Phone on the floor, side-on, about 2 m away. Keep your whole body and the floor in shot.
+            } @else if (recording()) {
+              {{ handsFree() ? (watchState() === 'air' ? 'In the air…' : watchState() === 'landed' ? 'Landed. Stopping in a moment…' : 'Recording. Jump when ready.') : 'Recording…' }}
+            } @else if (handsFree() && framing().ok) {
+              {{ countdown() !== null ? 'Get ready…' : 'Good framing. Hold still to start recording.' }}
+            } @else {
+              {{ framing().message }}
+            }
+          </p>
         }
       </div>
 
@@ -47,10 +90,15 @@ interface CameraMode {
         </p>
       }
 
+      <label class="hands-free">
+        <input type="checkbox" [checked]="handsFree()" (change)="setHandsFree($any($event.target).checked)" [disabled]="recording()" />
+        Hands-free: start when I stand still, stop after I land
+      </label>
+
       <div class="controls">
         <button class="btn ghost" type="button" (click)="cancel()">Cancel</button>
         @if (!recording()) {
-          <button class="shutter" type="button" (click)="startRecording()" [disabled]="!ready()" aria-label="Start recording"></button>
+          <button class="shutter" type="button" (click)="manualStart()" [disabled]="!ready()" aria-label="Start recording"></button>
         } @else {
           <button class="shutter stop" type="button" (click)="stopRecording()" aria-label="Stop recording"></button>
         }
@@ -105,6 +153,45 @@ interface CameraMode {
         background: #fff;
       }
     }
+    .guide {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      line {
+        stroke: #ffb020;
+        stroke-linecap: round;
+        &.ok {
+          stroke: #3ddc97;
+        }
+        &.floor {
+          stroke: rgba(255, 255, 255, 0.7);
+          stroke-dasharray: 10 8;
+        }
+      }
+    }
+    .count {
+      position: absolute;
+      font-family: var(--display);
+      font-size: 7rem;
+      font-weight: 700;
+      color: #fff;
+      text-shadow: 0 2px 12px rgba(0, 0, 0, 0.6);
+    }
+    .hands-free {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-weight: 600;
+      input {
+        width: 22px;
+        height: 22px;
+      }
+    }
+    .tip.good {
+      background: rgba(31, 138, 76, 0.85);
+    }
     .tip {
       position: absolute;
       left: 10px;
@@ -158,6 +245,26 @@ export class Recorder implements OnInit, OnDestroy {
   readonly cancelled = output<void>();
 
   private readonly preview = viewChild.required<ElementRef<HTMLVideoElement>>('preview');
+  private readonly poseSvc = inject(PoseDetectorService);
+  private readonly feedback = inject(FeedbackService);
+  protected readonly bones = BONES;
+  /** Live pose guide is running (the model loaded). */
+  protected readonly guide = signal(false);
+  protected readonly pose = signal<FootSample | null>(null);
+  protected readonly size = signal<{ w: number; h: number } | null>(null);
+  protected readonly framing = computed(() => framingOf(this.pose()));
+  protected readonly floorY = computed(() => {
+    const p = this.pose();
+    return p && isFinite(p.footY) ? p.footY : null;
+  });
+  protected readonly handsFree = signal(readHandsFree());
+  protected readonly countdown = signal<number | null>(null);
+  protected readonly watchState = signal<'ground' | 'air' | 'landed' | 'done'>('ground');
+  private recent: FootSample[] = [];
+  private stillSince: number | null = null;
+  private watcher: JumpWatcher | null = null;
+  private loopAlive = false;
+  private countdownTimer?: ReturnType<typeof setTimeout>;
   protected readonly mode = signal<CameraMode | null>(null);
   protected readonly ready = signal(false);
   protected readonly recording = signal(false);
@@ -183,6 +290,8 @@ export class Recorder implements OnInit, OnDestroy {
   }
 
   ngOnDestroy() {
+    this.loopAlive = false;
+    clearTimeout(this.countdownTimer);
     this.discard = true;
     clearInterval(this.timer);
     this.recorder?.state === 'recording' && this.recorder.stop();
@@ -218,6 +327,7 @@ export class Recorder implements OnInit, OnDestroy {
       v.srcObject = this.stream;
       await v.play().catch(() => undefined);
       this.ready.set(true);
+      this.startGuide();
     } catch (e) {
       const name = (e as Error).name;
       this.error.set(
@@ -257,6 +367,97 @@ export class Recorder implements OnInit, OnDestroy {
     this.mode.set({ ...best, height: Math.min(best.width, best.height) || best.height });
   }
 
+  /** Pose on the preview a few times a second: framing hints, and hands-free start/stop. */
+  private async startGuide() {
+    if (this.loopAlive) return;
+    this.loopAlive = true;
+    const v = this.preview().nativeElement;
+    let failures = 0;
+    while (this.loopAlive) {
+      const busy = this.recording() && !this.handsFree();
+      if (!busy && this.ready() && v.videoWidth) {
+        try {
+          const s = await this.poseSvc.detectLive(v);
+          if (!this.loopAlive) break;
+          this.guide.set(true);
+          this.size.set({ w: v.videoWidth, h: v.videoHeight });
+          this.pose.set(s);
+          if (s) this.onPose(s);
+        } catch {
+          // No model (offline): keep the plain tip.
+          if (++failures > 2) {
+            this.guide.set(false);
+            this.loopAlive = false;
+            break;
+          }
+        }
+      }
+      await new Promise((r) => setTimeout(r, this.recording() ? 100 : 160));
+    }
+  }
+
+  private onPose(s: FootSample) {
+    const now = performance.now();
+    this.recent.push(s);
+    if (this.recent.length > 8) this.recent.shift();
+    if (!this.handsFree()) return;
+
+    if (this.recording()) {
+      const st = this.watcher!.push(s, now);
+      this.watchState.set(st);
+      if (st === 'done') {
+        this.feedback.cue('stop');
+        this.stopRecording();
+      }
+      return;
+    }
+    const legLen = median(this.recent.map((x) => x.legLen).filter((x) => x > 0));
+    const ready = this.framing().ok && isStill(this.recent, legLen);
+    if (!ready) {
+      this.stillSince = null;
+      this.cancelCountdown();
+      return;
+    }
+    this.stillSince ??= now;
+    if (now - this.stillSince > 800 && this.countdown() === null) this.runCountdown(3);
+  }
+
+  private runCountdown(n: number) {
+    if (n === 0) {
+      this.countdown.set(null);
+      this.feedback.cue('go');
+      this.startRecording();
+      return;
+    }
+    this.countdown.set(n);
+    this.feedback.cue('tick');
+    this.countdownTimer = setTimeout(() => this.runCountdown(n - 1), 800);
+  }
+
+  private cancelCountdown() {
+    if (this.countdown() === null) return;
+    clearTimeout(this.countdownTimer);
+    this.countdown.set(null);
+  }
+
+  protected manualStart() {
+    this.cancelCountdown();
+    this.feedback.unlock();
+    this.startRecording();
+  }
+
+  protected setHandsFree(on: boolean) {
+    this.handsFree.set(on);
+    this.feedback.unlock();
+    this.cancelCountdown();
+    this.stillSince = null;
+    try {
+      localStorage.setItem(HANDS_FREE_KEY, on ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }
+
   protected flip() {
     this.facing = this.facing === 'environment' ? 'user' : 'environment';
     this.open();
@@ -286,6 +487,8 @@ export class Recorder implements OnInit, OnDestroy {
     this.startedAt = new Date().toISOString();
     this.recorder.start(1000);
     this.recording.set(true);
+    this.watcher = new JumpWatcher();
+    this.watchState.set('ground');
     this.seconds.set(0);
     const t0 = Date.now();
     this.timer = setInterval(() => {
@@ -309,14 +512,25 @@ export class Recorder implements OnInit, OnDestroy {
     const stamp = this.startedAt.slice(0, 19).replace(/[:T]/g, '-');
     const file = new File([blob], `jump-${stamp}.${ext}`, { type: blob.type });
     const fps = this.mode()?.fps ?? null;
+    this.loopAlive = false;
     this.stopStream();
     this.recorded.emit({ file, recordedAt: this.startedAt, fps: fps ? Math.round(fps) : null });
   }
 
   protected cancel() {
+    this.loopAlive = false;
+    this.cancelCountdown();
     this.discard = true;
     this.stopRecording();
     this.stopStream();
     this.cancelled.emit();
+  }
+}
+
+function readHandsFree(): boolean {
+  try {
+    return localStorage.getItem(HANDS_FREE_KEY) === '1';
+  } catch {
+    return false;
   }
 }

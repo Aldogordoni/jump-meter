@@ -8,6 +8,8 @@ import { ChartPoint, ProgressChart } from '../shared/progress-chart';
 import { clipStore, StoredClip } from '../core/clip-store';
 import { CloudService } from '../core/cloud.service';
 import { JumpEditor } from '../shared/jump-editor';
+import { ClipViewer, ViewClip } from '../shared/clip-viewer';
+import { cardDataFor, drawShareCard, shareImage } from '../core/share-card';
 import { Metric as InsightMetric, Session, agreement, groupSessions, isPersonalRecord, readiness, tagStats } from '../core/insights';
 
 type MetricKey = 'height' | 'rsi' | 'contact' | 'rsiMod' | 'ttt' | 'distance' | 'reach';
@@ -21,7 +23,7 @@ interface Metric {
 
 @Component({
   selector: 'app-history',
-  imports: [DatePipe, DecimalPipe, RouterLink, ProgressChart, HeightPipe, JumpEditor],
+  imports: [DatePipe, DecimalPipe, RouterLink, ProgressChart, HeightPipe, JumpEditor, ClipViewer],
   template: `
     <h1>History</h1>
 
@@ -213,14 +215,22 @@ interface Metric {
                   @if (r.note) {
                     <span class="note">{{ r.note }}</span>
                   }
-                  @if (clipIds().has(r.id) || r.hasClip) {
-                    <button class="thumb" type="button" (click)="openClip(r)" [disabled]="opening() === r.id">
-                      @if (posters()[r.id]; as src) {
-                        <img [src]="src" alt="" />
+                  <span class="row-actions">
+                    @if (clipIds().has(r.id) || r.hasClip) {
+                      <button class="thumb" type="button" (click)="openClip(r)" [disabled]="opening() === r.id">
+                        @if (posters()[r.id]; as src) {
+                          <img [src]="src" alt="" />
+                        }
+                        <span>{{ opening() === r.id ? 'Downloading clip…' : compareFrom() && compareFrom()!.id !== r.id ? 'Compare with this' : 'Watch clip' }}</span>
+                      </button>
+                      @if (!compareFrom()) {
+                        <button class="link" type="button" (click)="compareFrom.set(r)">Compare</button>
                       }
-                      <span>{{ opening() === r.id ? 'Downloading clip…' : 'Watch clip' }}</span>
+                    }
+                    <button class="link" type="button" (click)="shareCard(r)" [disabled]="sharing() === r.id">
+                      {{ sharing() === r.id ? 'Making card…' : 'Share card' }}
                     </button>
-                  }
+                  </span>
                   @if (editing() === r.id) {
                     <app-jump-editor [jump]="r" (closed)="editing.set(null)" />
                   }
@@ -239,17 +249,12 @@ interface Metric {
     }
 
     @if (viewing(); as v) {
-      <div class="viewer" role="dialog" aria-modal="true" aria-label="Jump clip" (click)="closeClip()">
-        <div class="viewer-box" (click)="$event.stopPropagation()">
-          <video [src]="v.url" controls autoplay loop muted playsinline></video>
-          <div class="viewer-actions">
-            @if (canShare()) {
-              <button class="btn primary" type="button" (click)="shareClip()">Share or save</button>
-            }
-            <a class="btn" [href]="v.url" [download]="v.fileName">Download</a>
-            <button class="btn ghost" type="button" (click)="closeClip()">Close</button>
-          </div>
-        </div>
+      <app-clip-viewer [clips]="v" (closed)="closeClip()" (trimmed)="onTrimmed($event)" />
+    }
+    @if (compareFrom(); as cf) {
+      <div class="compare-bar" role="status">
+        Pick another jump to compare with your {{ cf.heightCm | height }} jump.
+        <button class="btn ghost" type="button" (click)="compareFrom.set(null)">Cancel</button>
       </div>
     }
 
@@ -423,36 +428,31 @@ interface Metric {
         background: #000;
       }
     }
-    .viewer {
-      position: fixed;
-      inset: 0;
-      z-index: 20;
-      background: rgba(10, 14, 24, 0.85);
-      display: grid;
-      place-items: center;
-      padding: 16px;
-    }
-    .viewer-box {
-      width: min(100%, 720px);
-      display: grid;
-      gap: 10px;
-      video {
-        width: 100%;
-        max-height: 70vh;
-        background: #000;
-        border-radius: var(--r-lg);
-      }
-    }
-    .viewer-actions {
+    .row-actions {
       display: flex;
       flex-wrap: wrap;
-      gap: 8px;
+      align-items: center;
+      gap: 6px 14px;
+      margin-top: 2px;
+    }
+    .compare-bar {
+      position: fixed;
+      left: 12px;
+      right: 12px;
+      bottom: calc(70px + env(safe-area-inset-bottom));
+      z-index: 15;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: var(--r-lg);
+      background: var(--ink);
+      color: var(--paper);
+      font-weight: 600;
       .btn {
-        color: #fff;
-        border-color: #fff;
-      }
-      .btn.primary {
-        border-color: var(--blue);
+        color: var(--paper);
+        border-color: var(--paper);
       }
     }
     .seg {
@@ -538,7 +538,7 @@ interface Metric {
       vertical-align: middle;
       &.pr {
         background: var(--red);
-        color: #fff;
+        color: var(--on-accent);
       }
     }
     .warn-line {
@@ -586,8 +586,9 @@ export class History implements OnDestroy {
   private readonly posterRequested = new Set<string>();
   protected readonly clipIds = signal<Set<string>>(new Set());
   protected readonly posters = signal<Record<string, string>>({});
-  protected readonly viewing = signal<{ url: string; fileName: string; clip: StoredClip } | null>(null);
-  protected readonly canShare = signal(typeof navigator !== 'undefined' && !!navigator.canShare);
+  protected readonly viewing = signal<ViewClip[] | null>(null);
+  protected readonly compareFrom = signal<JumpRecord | null>(null);
+  protected readonly sharing = signal<string | null>(null);
   private readonly pendingClipDeletes = new Set<string>();
 
   constructor() {
@@ -632,7 +633,7 @@ export class History implements OnDestroy {
       .catch(() => undefined);
   }
 
-  protected async openClip(r: JumpRecord) {
+  private async loadClip(r: JumpRecord): Promise<StoredClip | undefined> {
     let clip = await clipStore.get(r.id).catch(() => undefined);
     if (!clip && r.hasClip) {
       this.opening.set(r.id);
@@ -643,26 +644,70 @@ export class History implements OnDestroy {
         this.opening.set(null);
       }
     }
-    if (!clip) return;
+    return clip;
+  }
+
+  private toView(r: JumpRecord, clip: StoredClip): ViewClip {
     const ext = clip.mime.includes('mp4') ? 'mp4' : 'webm';
-    const name = `jump-${r.date.slice(0, 10)}-${r.type.replace(/\W+/g, '-').toLowerCase()}-${r.heightCm}cm.${ext}`;
-    this.viewing.set({ url: URL.createObjectURL(clip.video), fileName: name, clip });
+    const u = this.units();
+    return {
+      id: r.id,
+      url: URL.createObjectURL(clip.video),
+      label: `${formatNumber(toUnits(r.heightCm, u), 1)} ${u} ${r.type}, ${new Date(r.date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`,
+      fileName: `jump-${r.date.slice(0, 10)}-${r.type.replace(/\W+/g, '-').toLowerCase()}-${r.heightCm}cm.${ext}`,
+      video: clip.video,
+      mime: clip.mime,
+    };
+  }
+
+  protected async openClip(r: JumpRecord) {
+    const first = this.compareFrom();
+    const clip = await this.loadClip(r);
+    if (!clip) return;
+    if (first && first.id !== r.id) {
+      const other = await this.loadClip(first);
+      this.compareFrom.set(null);
+      if (other) {
+        // Older jump on the left.
+        const pair = [this.toView(first, other), this.toView(r, clip)];
+        this.viewing.set(first.date <= r.date ? pair : pair.reverse());
+        return;
+      }
+    }
+    this.viewing.set([this.toView(r, clip)]);
   }
 
   protected closeClip() {
-    const v = this.viewing();
-    if (v) URL.revokeObjectURL(v.url);
+    for (const v of this.viewing() ?? []) URL.revokeObjectURL(v.url);
     this.viewing.set(null);
   }
 
-  protected async shareClip() {
-    const v = this.viewing();
-    if (!v) return;
-    const file = new File([v.clip.video], v.fileName, { type: v.clip.mime });
+  protected onTrimmed(id: string) {
+    this.closeClip();
+    const old = this.posters()[id];
+    if (old?.startsWith('blob:')) URL.revokeObjectURL(old);
+    this.posters.update(({ [id]: _, ...rest }) => rest);
+    this.posterRequested.delete(id);
+    this.refreshClips();
+  }
+
+  protected async shareCard(r: JumpRecord) {
+    this.sharing.set(r.id);
     try {
-      if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: 'My jump' });
-    } catch {
-      /* user cancelled */
+      const clip = await clipStore.get(r.id).catch(() => undefined);
+      const all = this.ofType();
+      const metric = r.type === 'Broad jump' && r.distanceCm !== undefined ? 'distanceCm' : 'heightCm';
+      const blob = await drawShareCard(
+        cardDataFor(r, this.units(), {
+          pr: isPersonalRecord(all, r, metric),
+          name: this.cloud.user() ? this.cloud.shownName() : null,
+          image: clip?.poster ?? null,
+          captioned: true,
+        }),
+      );
+      await shareImage(blob, `jump-${r.date.slice(0, 10)}.png`, 'My jump');
+    } finally {
+      this.sharing.set(null);
     }
   }
 
