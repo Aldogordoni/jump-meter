@@ -73,7 +73,7 @@ const STEP = 1 / 30; // clips are encoded at 30 fps
         </div>
 
         @if (!compare()) {
-          @if (trimming()) {
+          @if (trimming() && editable()) {
             <div class="trim" role="group" aria-label="Trim">
               <p class="small">Play or step to a moment, then set where the clip should start and end.</p>
               <div class="row">
@@ -92,7 +92,7 @@ const STEP = 1 / 30; // clips are encoded at 30 fps
             </div>
           }
           <div class="actions">
-            @if (!trimming()) {
+            @if (!trimming() && editable()) {
               <button class="btn" type="button" (click)="startTrim()">Trim</button>
             }
             @if (canShare) {
@@ -217,6 +217,8 @@ export class ClipViewer implements AfterViewInit, OnDestroy {
   private readonly store = inject(StoreService);
   private readonly cloud = inject(CloudService);
   readonly clips = input.required<ViewClip[]>();
+  /** Your own clip: allow trimming. */
+  readonly editable = input(true);
   readonly closed = output<void>();
   /** A trimmed clip was saved for this jump id. */
   readonly trimmed = output<string>();

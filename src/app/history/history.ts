@@ -9,6 +9,8 @@ import { clipStore, StoredClip } from '../core/clip-store';
 import { CloudService } from '../core/cloud.service';
 import { JumpEditor } from '../shared/jump-editor';
 import { ClipViewer, ViewClip } from '../shared/clip-viewer';
+import { Comments } from '../shared/comments';
+import { SquadService } from '../core/squad.service';
 import { cardDataFor, drawShareCard, shareImage } from '../core/share-card';
 import { Metric as InsightMetric, Session, agreement, groupSessions, isPersonalRecord, readiness, tagStats } from '../core/insights';
 
@@ -23,7 +25,7 @@ interface Metric {
 
 @Component({
   selector: 'app-history',
-  imports: [DatePipe, DecimalPipe, RouterLink, ProgressChart, HeightPipe, JumpEditor, ClipViewer],
+  imports: [DatePipe, DecimalPipe, RouterLink, ProgressChart, HeightPipe, JumpEditor, ClipViewer, Comments],
   template: `
     <h1>History</h1>
 
@@ -230,7 +232,15 @@ interface Metric {
                     <button class="link" type="button" (click)="shareCard(r)" [disabled]="sharing() === r.id">
                       {{ sharing() === r.id ? 'Making card…' : 'Share card' }}
                     </button>
+                    @if (cloud.signedIn() && r.synced) {
+                      <button class="link" type="button" (click)="thread.set(thread() === r.id ? null : r.id)" [attr.aria-expanded]="thread() === r.id">
+                        Comments@if (commentCounts()[r.id]) { ({{ commentCounts()[r.id] }})}
+                      </button>
+                    }
                   </span>
+                  @if (thread() === r.id) {
+                    <app-comments [jumpId]="r.id" [canModerate]="true" hint="Coaches you share with can comment here too." (count)="setCount(r.id, $event)" />
+                  }
                   @if (editing() === r.id) {
                     <app-jump-editor [jump]="r" (closed)="editing.set(null)" />
                   }
@@ -581,7 +591,11 @@ interface Metric {
 })
 export class History implements OnDestroy {
   protected readonly store = inject(StoreService);
-  private readonly cloud = inject(CloudService);
+  protected readonly cloud = inject(CloudService);
+  private readonly squadSvc = inject(SquadService);
+  protected readonly thread = signal<string | null>(null);
+  protected readonly commentCounts = signal<Record<string, number>>({});
+  private readonly countsAsked = new Set<string>();
   protected readonly opening = signal<string | null>(null);
   private readonly posterRequested = new Set<string>();
   protected readonly clipIds = signal<Set<string>>(new Set());
@@ -593,6 +607,20 @@ export class History implements OnDestroy {
 
   constructor() {
     this.refreshClips();
+    // Comment counts for the jumps on screen (coach feedback).
+    effect(() => {
+      if (!this.cloud.signedIn()) return;
+      const ids = this.sessionsShown()
+        .flatMap((s) => s.jumps)
+        .filter((r) => r.synced && !this.countsAsked.has(r.id))
+        .map((r) => r.id);
+      if (!ids.length) return;
+      ids.forEach((id) => this.countsAsked.add(id));
+      this.squadSvc
+        .commentCounts(ids)
+        .then((c) => this.commentCounts.update((x) => ({ ...x, ...c })))
+        .catch(() => undefined);
+    });
     // Load poster thumbnails for the jumps on screen.
     effect(() => {
       const ids = this.clipIds();
@@ -618,6 +646,10 @@ export class History implements OnDestroy {
           .catch(() => undefined);
       }
     });
+  }
+
+  protected setCount(id: string, n: number) {
+    this.commentCounts.update((c) => ({ ...c, [id]: n }));
   }
 
   ngOnDestroy() {

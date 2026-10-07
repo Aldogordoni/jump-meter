@@ -21,7 +21,7 @@ export interface AllowedEmail {
   added_at: string;
 }
 
-interface JumpRow {
+export interface JumpRow {
   id: string;
   jumped_at: string;
   type: string;
@@ -47,7 +47,7 @@ const EXTRA_KEYS = ['reference', 'posture', 'armSwing', 'confidence', 'kinematic
 
 const DELETES_KEY = 'jump-meter.cloud.pending-deletes';
 const LAST_SYNC_KEY = 'jump-meter.cloud.last-sync';
-const BUCKET = 'clips';
+export const BUCKET = 'clips';
 /** Deletions wait out the undo window before reaching the cloud. */
 const DELETE_DELAY_MS = 7000;
 
@@ -141,6 +141,11 @@ export class CloudService {
 
   /** Error from a sign-in link, shown on the Account page. */
   readonly linkError = signal<string | null>(null);
+
+  /** The Supabase client, for features built on top of sync (squads, comments). */
+  api(): Promise<SupabaseClient> {
+    return this.sb();
+  }
 
   private sb(): Promise<SupabaseClient> {
     this.client ??= import('@supabase/supabase-js').then(({ createClient }) =>
@@ -378,7 +383,13 @@ export class CloudService {
   private async mergeJumps(sb: SupabaseClient) {
     const remote = new Map<string, JumpRow>();
     for (let from = 0; ; from += 1000) {
-      const { data, error } = await sb.from('jumps').select('*').order('jumped_at').range(from, from + 999);
+      // Only my own jumps: coaches can also read athletes' shared jumps, which must not land in my history.
+      const { data, error } = await sb
+        .from('jumps')
+        .select('*')
+        .eq('user_id', this.user()!.id)
+        .order('jumped_at')
+        .range(from, from + 999);
       if (error) throw error;
       data.forEach((r: JumpRow) => remote.set(r.id, r));
       if (data.length < 1000) break;
@@ -545,6 +556,10 @@ export class CloudService {
       if (rmErr) throw rmErr;
     }
     // Delete the data directly (allowed by the row-level security)…
+    // Squads I own go for everyone; then I leave the rest. (Comments go with the jumps.)
+    await sb.from('squads').delete().eq('owner_id', u.id);
+    await sb.from('squad_members').delete().eq('user_id', u.id);
+    await sb.from('jump_comments').delete().eq('author_id', u.id);
     const j = await sb.from('jumps').delete().eq('user_id', u.id);
     if (j.error) throw j.error;
     const p = await sb.from('profiles').delete().eq('user_id', u.id);
@@ -621,7 +636,7 @@ function toRow(r: JumpRecord): Omit<JumpRow, 'has_clip'> & { updated_at: string 
   };
 }
 
-function fromRow(r: JumpRow): JumpRecord {
+export function fromRow(r: JumpRow): JumpRecord {
   const opt = (v: number | null) => (v === null ? undefined : v);
   return {
     id: r.id,

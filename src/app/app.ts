@@ -39,6 +39,9 @@ import { StoreService } from './core/store.service';
       <a routerLink="/measure" routerLinkActive="on" ariaCurrentWhenActive="page">Measure</a>
       <a routerLink="/history" routerLinkActive="on" ariaCurrentWhenActive="page">History</a>
       <a routerLink="/train" routerLinkActive="on" ariaCurrentWhenActive="page">Train</a>
+      @if (cloud.signedIn()) {
+        <a routerLink="/team" routerLinkActive="on" ariaCurrentWhenActive="page">Team</a>
+      }
       <a routerLink="/setup" routerLinkActive="on" ariaCurrentWhenActive="page">Setup</a>
     </nav>
     @if (showOnboarding()) {
@@ -131,7 +134,8 @@ import { StoreService } from './core/store.service';
       position: fixed;
       inset: auto 0 0 0;
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-auto-flow: column;
+      grid-auto-columns: 1fr;
       background: var(--surface);
       border-top: 1.5px solid var(--line);
       padding-bottom: env(safe-area-inset-bottom);
