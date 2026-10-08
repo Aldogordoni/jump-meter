@@ -1,4 +1,4 @@
-import { Component, OnDestroy, computed, effect, inject, signal } from '@angular/core';
+import { Component, OnDestroy, computed, effect, inject, signal, untracked } from '@angular/core';
 import { DatePipe, DecimalPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { StoreService } from '../core/store.service';
@@ -607,6 +607,11 @@ export class History implements OnDestroy {
 
   constructor() {
     this.refreshClips();
+    // A new comment arrived live.
+    effect(() => {
+      const p = this.cloud.commentPing();
+      if (p) untracked(() => this.commentCounts.update((c) => ({ ...c, [p.jumpId]: (c[p.jumpId] ?? 0) + 1 })));
+    });
     // Comment counts for the jumps on screen (coach feedback).
     effect(() => {
       if (!this.cloud.signedIn()) return;

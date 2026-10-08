@@ -91,7 +91,7 @@ import { fromUnits, toUnits } from '../core/jump-math';
             <h2 #heading tabindex="-1" id="ob-h-3">Keep your jumps safe</h2>
             <p>
               Your jumps are saved on this phone. Sign in to back them up with their video clips and see them on any device.
-              Accounts are invite-only.
+              Accounts are invite-only. <a href="#/privacy" (click)="finish()">How your data is handled</a>.
             </p>
             @if (cloud.configured && !cloud.user()) {
               <button class="btn" type="button" (click)="finish('/account')">Sign in</button>

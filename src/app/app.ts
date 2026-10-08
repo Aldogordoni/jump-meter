@@ -1,10 +1,11 @@
-import { Component, computed, inject } from '@angular/core';
+import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
 import { SwUpdate } from '@angular/service-worker';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { CloudService } from './core/cloud.service';
 import { Avatar } from './shared/avatar';
 import { Onboarding } from './shared/onboarding';
 import { StoreService } from './core/store.service';
+import { HousekeepingService } from './core/housekeeping.service';
 
 @Component({
   selector: 'app-root',
@@ -44,6 +45,13 @@ import { StoreService } from './core/store.service';
       }
       <a routerLink="/setup" routerLinkActive="on" ariaCurrentWhenActive="page">Setup</a>
     </nav>
+    @if (toast(); as t) {
+      <div class="toast" role="status">
+        {{ t.text }}
+        <a [routerLink]="t.link" (click)="toast.set(null)">Open</a>
+        <button type="button" class="x" (click)="toast.set(null)" aria-label="Dismiss">×</button>
+      </div>
+    }
     @if (showOnboarding()) {
       <app-onboarding />
     }
@@ -53,6 +61,34 @@ import { StoreService } from './core/store.service';
       display: block;
       min-height: 100dvh;
       padding-bottom: calc(64px + env(safe-area-inset-bottom));
+    }
+    .toast {
+      position: fixed;
+      left: 12px;
+      right: 12px;
+      bottom: calc(70px + env(safe-area-inset-bottom));
+      z-index: 40;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: var(--r-lg);
+      background: var(--ink);
+      color: var(--paper);
+      font-weight: 600;
+      a {
+        color: var(--paper);
+        margin-left: auto;
+      }
+      .x {
+        border: 0;
+        background: none;
+        color: var(--paper);
+        font-size: 1.4rem;
+        min-width: 32px;
+        min-height: 32px;
+        cursor: pointer;
+      }
     }
     .skip {
       position: absolute;
@@ -167,6 +203,9 @@ export class App {
     () => !this.store.settings().onboarded && !this.store.history().length && !location.hash.includes('access_token'),
   );
 
+  protected readonly toast = signal<{ text: string; link: string } | null>(null);
+  private toastTimer?: ReturnType<typeof setTimeout>;
+
   protected skip(e: Event) {
     e.preventDefault();
     document.getElementById('main')?.focus();
@@ -179,7 +218,21 @@ export class App {
   }
 
   constructor() {
+    // A coach (or athlete) commented: say so, wherever you are in the app.
+    effect(() => {
+      const ping = this.cloud.commentPing();
+      if (!ping) return;
+      untracked(() => {
+        const mine = this.store.history().some((r) => r.id === ping.jumpId);
+        this.toast.set({ text: mine ? 'New comment on one of your jumps' : 'New comment in your squad', link: mine ? '/history' : '/team' });
+        clearTimeout(this.toastTimer);
+        this.toastTimer = setTimeout(() => this.toast.set(null), 8000);
+      });
+    });
     if (!this.store.settings().onboarded && this.store.history().length) this.store.updateSettings({ onboarded: true });
+    // Old clips go once a day, a little after start-up.
+    const housekeeping = inject(HousekeepingService);
+    setTimeout(() => housekeeping.run().catch(() => undefined), 15000);
     this.cloud.init().catch((e) => console.warn('[jump-meter] cloud init failed', e));
     // Apply new versions straight away, so fixes reach the installed app without a double refresh.
     const sw = inject(SwUpdate);

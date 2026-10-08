@@ -70,9 +70,78 @@ import { AllowedEmail, CloudService } from '../core/cloud.service';
           <li class="muted">{{ busy() ? 'Loading…' : 'No emails yet.' }}</li>
         }
       </ul>
+
+      <h2>Change log</h2>
+      <p class="small muted">Every approval, change and removal, with who made it.</p>
+      <ul class="log">
+        @for (e of audit(); track e.id) {
+          <li>
+            <span class="when">{{ e.at | date: 'd MMM yyyy, HH:mm' }}</span>
+            <span><strong>{{ actionLabel[e.action] ?? e.action }}</strong> {{ e.email }}@if (e.is_admin) { (admin)}@if (e.note) { · {{ e.note }}}</span>
+            <span class="small muted">by {{ e.actor_email ?? 'the database console' }}</span>
+          </li>
+        } @empty {
+          <li class="muted">No changes recorded yet.</li>
+        }
+      </ul>
+
+      <h2>App errors</h2>
+      <p class="small muted">
+        Unexpected errors from signed-in users' phones, newest first. Emails and tokens are removed before they're sent.
+      </p>
+      @if (errors().length) {
+        <button class="btn ghost" type="button" (click)="clearErrors()" [disabled]="busy()">Clear errors older than 30 days</button>
+      }
+      <ul class="log">
+        @for (e of errors(); track e.id) {
+          <li>
+            <span class="when">{{ e.at | date: 'd MMM, HH:mm' }} · {{ e.path }} · {{ e.app_version }}</span>
+            <details>
+              <summary>{{ e.message }}</summary>
+              @if (e.stack) {
+                <pre>{{ e.stack }}</pre>
+              }
+              <p class="small muted">{{ e.user_agent }}</p>
+            </details>
+          </li>
+        } @empty {
+          <li class="muted">No errors reported. 🎉</li>
+        }
+      </ul>
     }
   `,
   styles: `
+    h2 {
+      margin-top: 28px;
+    }
+    .log {
+      list-style: none;
+      padding: 0;
+      margin: 8px 0 0;
+      display: grid;
+      gap: 8px;
+      li {
+        display: grid;
+        gap: 2px;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .when {
+        font-size: 0.82rem;
+        color: var(--ink-soft);
+      }
+      summary {
+        cursor: pointer;
+        overflow-wrap: anywhere;
+      }
+      pre {
+        white-space: pre-wrap;
+        font-size: 0.75rem;
+        overflow-wrap: anywhere;
+        max-height: 14em;
+        overflow: auto;
+      }
+    }
     .add {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -150,6 +219,9 @@ export class Admin implements OnInit {
   protected email = '';
   protected note = '';
   protected makeAdmin = false;
+  protected readonly audit = signal<AuditRow[]>([]);
+  protected readonly errors = signal<ErrorRow[]>([]);
+  protected readonly actionLabel: Partial<Record<string, string>> = { insert: 'Approved', update: 'Changed', delete: 'Removed' };
 
   ngOnInit() {
     this.refresh();
@@ -165,6 +237,7 @@ export class Admin implements OnInit {
         this.isError.set(false);
       }
       this.list.set(await this.cloud.listAllowed());
+      await this.loadLogs();
     } catch (e) {
       this.message.set((e as Error).message);
       this.isError.set(true);
@@ -172,6 +245,28 @@ export class Admin implements OnInit {
       this.busy.set(false);
       this.confirming.set(null);
     }
+  }
+
+  private async loadLogs() {
+    const sb = await this.cloud.api();
+    const [a, e] = await Promise.all([
+      sb.from('allowlist_audit').select('*').order('at', { ascending: false }).limit(100),
+      sb.from('client_errors').select('*').order('at', { ascending: false }).limit(100),
+    ]);
+    this.audit.set((a.data ?? []) as AuditRow[]);
+    this.errors.set((e.data ?? []) as ErrorRow[]);
+  }
+
+  protected clearErrors() {
+    return this.run(async () => {
+      const sb = await this.cloud.api();
+      const { error } = await sb
+        .from('client_errors')
+        .delete()
+        .lt('at', new Date(Date.now() - 30 * 86400000).toISOString());
+      if (error) throw new Error(error.message);
+      return 'Old errors cleared.';
+    });
   }
 
   protected refresh() {
@@ -202,4 +297,24 @@ export class Admin implements OnInit {
       return a.is_admin ? `${a.email} is no longer an admin.` : `${a.email} is now an admin.`;
     });
   }
+}
+
+interface AuditRow {
+  id: number;
+  at: string;
+  actor_email: string | null;
+  action: string;
+  email: string;
+  is_admin: boolean | null;
+  note: string | null;
+}
+
+interface ErrorRow {
+  id: number;
+  at: string;
+  message: string;
+  stack: string | null;
+  path: string | null;
+  app_version: string | null;
+  user_agent: string | null;
 }

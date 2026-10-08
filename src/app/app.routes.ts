@@ -7,6 +7,7 @@ export const routes: Routes = [
   { path: 'team', loadComponent: () => import('./team/team').then((m) => m.Team), title: 'Team · Jump Meter' },
   { path: 'setup', loadComponent: () => import('./setup/setup').then((m) => m.Setup), title: 'Setup · Jump Meter' },
   { path: 'account', loadComponent: () => import('./account/account').then((m) => m.Account), title: 'Account · Jump Meter' },
+  { path: 'privacy', loadComponent: () => import('./privacy/privacy').then((m) => m.Privacy), title: 'Privacy · Jump Meter' },
   { path: 'admin', loadComponent: () => import('./admin/admin').then((m) => m.Admin), title: 'Approved emails · Jump Meter' },
   { path: '', pathMatch: 'full', redirectTo: 'measure' },
   { path: '**', redirectTo: 'measure' },

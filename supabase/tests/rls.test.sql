@@ -182,4 +182,73 @@ select public.t_check((select count(*) from public.jumps) = 0, 'a token without 
 select public.t_check((select count(*) from public.squads) = 0, 'and no squads');
 reset role;
 
+
+-- ---------------------------------------------------------------------------
+-- 0006: two-factor, error log, audit log, quota
+-- ---------------------------------------------------------------------------
+create function public.t_as_aal(uid uuid, email text, aal text) returns void language sql as $$
+  select set_config('request.jwt.claims', json_build_object('sub', uid, 'email', email, 'aal', aal)::text, false);
+  select set_config('role', 'authenticated', false);
+$$;
+
+-- Two-factor: once a factor is verified, an aal1 session sees nothing.
+insert into auth.mfa_factors (user_id, status) values ('22222222-2222-2222-2222-222222222222', 'verified');
+select public.t_as_aal('22222222-2222-2222-2222-222222222222', 'ath@test.io', 'aal1');
+select public.t_check((select count(*) from public.jumps) = 0, 'with two-factor on, a password-only session sees nothing');
+reset role;
+select public.t_as_aal('22222222-2222-2222-2222-222222222222', 'ath@test.io', 'aal2');
+select public.t_check((select count(*) from public.jumps) = 2, 'after the second step the athlete sees their jumps');
+-- Error log
+insert into public.client_errors (message, path) values ('TypeError: x is undefined', '/measure');
+select public.t_check((select count(*) from public.client_errors) = 0, 'users cannot read the error log');
+reset role;
+select public.t_as('33333333-3333-3333-3333-333333333333', 'out@test.io');
+do $$ begin
+  insert into public.client_errors (user_id, message) values ('22222222-2222-2222-2222-222222222222', 'forged');
+  raise exception 'FAIL: reported an error as someone else';
+exception when others then
+  if sqlerrm like 'FAIL%' then raise; end if;
+  raise notice 'ok: cannot report errors as someone else';
+end $$;
+reset role;
+
+-- Make the coach an admin, then check the audit log and admin views.
+update public.allowed_emails set is_admin = true where email = 'coach@test.io';
+select public.t_as('11111111-1111-1111-1111-111111111111', 'coach@test.io');
+select public.t_check((select count(*) from public.client_errors) = 1, 'admins read the error log');
+insert into public.allowed_emails (email, note) values ('new@test.io', 'friend');
+update public.allowed_emails set note = 'teammate' where email = 'new@test.io';
+select public.t_check(
+  (select string_agg(action, ',' order by id) from public.allowlist_audit where email = 'new@test.io') = 'insert,update',
+  'allowlist changes are audited');
+select public.t_check(
+  (select actor_email from public.allowlist_audit where email = 'new@test.io' order by id limit 1) = 'coach@test.io',
+  'audit records who made the change');
+reset role;
+select public.t_as('33333333-3333-3333-3333-333333333333', 'out@test.io');
+select public.t_check((select count(*) from public.allowlist_audit) = 0, 'non-admins cannot read the audit log');
+do $$ begin
+  insert into public.allowlist_audit (action, email) values ('insert', 'fake@test.io');
+  raise exception 'FAIL: wrote to the audit log directly';
+exception when others then
+  if sqlerrm like 'FAIL%' then raise; end if;
+  raise notice 'ok: nobody can write the audit log directly';
+end $$;
+reset role;
+
+-- Quota: the 2001st file is refused.
+insert into storage.objects (bucket_id, name)
+select 'clips', '33333333-3333-3333-3333-333333333333/' || g || '.jpg' from generate_series(1, 1998) g;
+select public.t_as('33333333-3333-3333-3333-333333333333', 'out@test.io');
+insert into storage.objects (bucket_id, name) values ('clips', '33333333-3333-3333-3333-333333333333/ok.mp4');
+select public.t_check(public.my_file_count() = 2000, 'uploads work under the quota');
+do $$ begin
+  insert into storage.objects (bucket_id, name) values ('clips', '33333333-3333-3333-3333-333333333333/over.mp4');
+  raise exception 'FAIL: went over the quota';
+exception when others then
+  if sqlerrm like 'FAIL%' then raise; end if;
+  raise notice 'ok: uploads stop at the quota';
+end $$;
+reset role;
+
 \echo 'All security rule checks passed.'

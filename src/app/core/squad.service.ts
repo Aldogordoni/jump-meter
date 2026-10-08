@@ -119,13 +119,11 @@ export class SquadService {
     const sb = await this.cloud.api();
     const { data, error } = await sb.rpc('squad_roster', { sq: squadId });
     if (error) throw error;
+    // Function results come back without nullability in the generated types.
     return (data ?? []).map(
-      (r: {
-        user_id: string; role: 'coach' | 'athlete'; share_jumps: boolean; on_leaderboard: boolean; joined_at: string;
-        display_name: string | null; username: string | null; avatar_path: string | null;
-      }) => ({
+      (r) => ({
         userId: r.user_id,
-        role: r.role,
+        role: r.role as Member['role'],
         shareJumps: r.share_jumps,
         onLeaderboard: r.on_leaderboard,
         joinedAt: r.joined_at,
@@ -139,9 +137,9 @@ export class SquadService {
   /** My own consent for one squad. */
   async setSharing(squadId: string, patch: { shareJumps?: boolean; onLeaderboard?: boolean }) {
     const sb = await this.cloud.api();
-    const row: Record<string, boolean> = {};
-    if (patch.shareJumps !== undefined) row['share_jumps'] = patch.shareJumps;
-    if (patch.onLeaderboard !== undefined) row['on_leaderboard'] = patch.onLeaderboard;
+    const row: { share_jumps?: boolean; on_leaderboard?: boolean } = {};
+    if (patch.shareJumps !== undefined) row.share_jumps = patch.shareJumps;
+    if (patch.onLeaderboard !== undefined) row.on_leaderboard = patch.onLeaderboard;
     const { error } = await sb.from('squad_members').update(row).eq('squad_id', squadId).eq('user_id', this.me());
     if (error) throw error;
     this.squads.update((list) =>

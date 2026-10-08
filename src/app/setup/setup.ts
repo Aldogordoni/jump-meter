@@ -5,6 +5,7 @@ import { StoreService } from '../core/store.service';
 import { JUMP_TYPES, JumpRecord, fromUnits, toUnits } from '../core/jump-math';
 import { clipStore, requestPersistentStorage } from '../core/clip-store';
 import { CloudService } from '../core/cloud.service';
+import { HousekeepingService } from '../core/housekeeping.service';
 import { BackupProgress, buildBackup, readBackup, restoreClips } from '../core/backup';
 import { toCsv } from '../core/csv';
 
@@ -154,8 +155,9 @@ import { toCsv } from '../core/csv';
       <p>
         Your jumps, details and clips are always saved on this phone first, so the app works offline. If you
         <a routerLink="/account">sign in</a>, they're also kept in the cloud as a long-term record: a private database in
-        the EU that only you can read. Accounts are invite-only. Videos are only uploaded as the short clips you choose to
-        save, never the original recording.
+        the EU that only you can read, unless you choose to share with a coach. Accounts are invite-only. Videos are only
+        uploaded as the short clips you choose to save, never the original recording.
+        <a routerLink="/privacy">Privacy details</a>.
       </p>
       <p>
         Without signing in, clearing this browser's data or losing the phone loses your history, so export a backup now
@@ -167,6 +169,33 @@ import { toCsv } from '../core/csv';
       </p>
       @if (usage(); as u) {
         <p class="small muted">Using {{ u }} of storage on this device.</p>
+      }
+      <h3>Clips and storage</h3>
+      <div class="grid2">
+        <div class="field">
+          <label for="cq">Clip quality</label>
+          <select id="cq" [ngModel]="store.settings().clipQuality" (ngModelChange)="store.updateSettings({ clipQuality: $event })">
+            <option value="high">High (1080p)</option>
+            <option value="standard">Standard (720p, about a third of the size)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="cr">Delete clips of jumps older than</label>
+          <select id="cr" [ngModel]="store.settings().clipRetentionMonths" (ngModelChange)="setRetention($event)">
+            <option [ngValue]="null">Never</option>
+            <option [ngValue]="3">3 months</option>
+            <option [ngValue]="6">6 months</option>
+            <option [ngValue]="12">1 year</option>
+            <option [ngValue]="24">2 years</option>
+          </select>
+          <span class="hint">The jumps and their results are always kept; only the videos go.</span>
+        </div>
+      </div>
+      <p class="small muted">
+        Clips on this phone: {{ localClips() ?? '…' }}.@if (cloudBytes() !== null) { In your account: {{ cloudBytes() }}.}
+      </p>
+      @if (cleanupMsg()) {
+        <p class="small" role="status">{{ cleanupMsg() }}</p>
       }
       <h3>Backup</h3>
       <p class="small">
@@ -207,6 +236,12 @@ import { toCsv } from '../core/csv';
     </section>
   `,
   styles: `
+    .grid2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+      margin-bottom: 8px;
+    }
     section {
       margin-bottom: 28px;
       max-width: 40em;
@@ -289,12 +324,40 @@ export class Setup {
     return cm === null ? null : Math.round(toUnits(cm, this.store.settings().units) * 10) / 10;
   });
 
+  private readonly housekeeping = inject(HousekeepingService);
+
   constructor() {
+    this.loadStorage();
     requestPersistentStorage().then((p) => this.persisted.set(p));
     navigator.storage
       ?.estimate?.()
       .then((e) => e.usage !== undefined && this.usage.set(`${(e.usage / 1024 / 1024).toFixed(1)} MB`))
       .catch(() => undefined);
+  }
+
+  protected readonly localClips = signal<string | null>(null);
+  protected readonly cloudBytes = signal<string | null>(null);
+  protected readonly cleanupMsg = signal<string | null>(null);
+
+  private loadStorage() {
+    this.housekeeping.localBytes().then((b) => this.localClips.set(mb(b))).catch(() => undefined);
+    this.cloud.storageBytes().then((b) => this.cloudBytes.set(b === null ? null : mb(b))).catch(() => undefined);
+  }
+
+  protected setRetention(months: number | null) {
+    const n = this.housekeeping.due(months ?? null).length;
+    if (months && n && !confirm(`This deletes the video clips of ${n} older jumps, on this phone and in the cloud. Their results are kept. Continue?`)) {
+      return;
+    }
+    this.store.updateSettings({ clipRetentionMonths: months });
+    if (!months) return;
+    this.housekeeping
+      .run()
+      .then((k) => {
+        this.cleanupMsg.set(k ? `Deleted ${k} old clip${k === 1 ? '' : 's'}.` : 'No clips that old.');
+        this.loadStorage();
+      })
+      .catch(() => this.cleanupMsg.set("Couldn't delete the old clips in the cloud. They'll be retried next time."));
   }
 
   protected setStature(v: number | null) {
@@ -395,4 +458,8 @@ export class Setup {
       this.progress.set(null);
     }
   }
+}
+
+function mb(bytes: number) {
+  return bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }

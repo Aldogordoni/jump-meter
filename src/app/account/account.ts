@@ -5,6 +5,7 @@ import { RouterLink } from '@angular/router';
 import { CloudService } from '../core/cloud.service';
 import { StoreService } from '../core/store.service';
 import { Avatar } from '../shared/avatar';
+import { MIN_LENGTH, passwordStrength } from '../core/password-strength';
 
 @Component({
   selector: 'app-account',
@@ -82,7 +83,8 @@ import { Avatar } from '../shared/avatar';
         <p class="small muted">
           What's stored: your email, username, display name and picture, your jumps and their stats, your settings
           (including body mass and height if you entered them) and the clips you save. It's kept in a private database in
-          the EU and only you can see it. You can delete all of it from this page.
+          the EU and only you can see it, unless you share with a coach. You can delete all of it from this page.
+          <a routerLink="/privacy">Privacy details</a>.
         </p>
       </section>
     } @else {
@@ -105,7 +107,22 @@ import { Avatar } from '../shared/avatar';
           </div>
         </div>
 
-        @if (cloud.access() === 'revoked') {
+        @if (cloud.access() === 'mfa') {
+          <h2>Two-step sign-in</h2>
+          <p>Enter the 6-digit code from your authenticator app to finish signing in.</p>
+          <form class="grid" (ngSubmit)="verifyMfa()">
+            <div class="field">
+              <label for="mfa">Code</label>
+              <input id="mfa" name="mfa" inputmode="numeric" autocomplete="one-time-code" maxlength="8" [(ngModel)]="mfaCode" />
+            </div>
+            <div>
+              <button class="btn primary" type="submit" [disabled]="busy() || mfaCode.length < 6">Verify</button>
+            </div>
+          </form>
+          @if (message()) {
+            <p class="error" role="alert">{{ message() }}</p>
+          }
+        } @else if (cloud.access() === 'revoked') {
           <p class="error">Your access has been removed by the admin. Your jumps are still on this phone.</p>
         } @else {
           @if (needsSetup()) {
@@ -134,15 +151,21 @@ import { Avatar } from '../shared/avatar';
             <input type="text" name="username" autocomplete="username" [value]="cloud.user()!.email" class="sr-only" tabindex="-1" aria-hidden="true" />
             <div class="field">
               <label for="npw">New password</label>
-              <input id="npw" name="npw" type="password" autocomplete="new-password" minlength="8" [(ngModel)]="newPassword" />
-              <span class="hint">At least 8 characters. Sign in with your email or username plus this password.</span>
+              <input id="npw" name="npw" type="password" autocomplete="new-password" [attr.minlength]="minLength" [(ngModel)]="newPassword" aria-describedby="pw-meter" />
+              <span class="hint">At least {{ minLength }} characters. A short phrase of unrelated words works well.</span>
+              @if (newPassword) {
+                <div id="pw-meter" class="meter" [attr.data-score]="strength().score" aria-live="polite">
+                  <span class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                  <strong>{{ strength().label }}</strong>@if (strength().hint) {<span class="small"> {{ strength().hint }}</span>}
+                </div>
+              }
             </div>
             <div class="field">
               <label for="npw2">Repeat it</label>
               <input id="npw2" name="npw2" type="password" autocomplete="new-password" [(ngModel)]="newPassword2" />
             </div>
             <div>
-              <button class="btn" type="submit" [disabled]="busy() || !newPassword">Set password</button>
+              <button class="btn" type="submit" [disabled]="busy() || !strength().ok">Set password</button>
             </div>
           </form>
 
@@ -151,6 +174,36 @@ import { Avatar } from '../shared/avatar';
           }
           @if (message()) {
             <p class="error" role="alert">{{ message() }}</p>
+          }
+
+          <h2>Two-step sign-in</h2>
+          @if (factors(); as fs) {
+            @if (fs.length) {
+              <p class="ok">On. Signing in also asks for a code from your authenticator app.</p>
+              @for (f of fs; track f.id) {
+                <div class="row">
+                  <span class="small muted">Added {{ f.createdAt | date: 'd MMM yyyy' }}</span>
+                  <button class="btn ghost" type="button" (click)="removeMfa(f.id)" [disabled]="busy()">Turn off</button>
+                </div>
+              }
+            } @else if (enrolling(); as e) {
+              <p>Scan this with an authenticator app (Google Authenticator, 1Password, Authy…), then enter the code it shows.</p>
+              <img class="qr" [src]="e.qr" alt="QR code for your authenticator app" width="180" height="180" />
+              <p class="small muted">Can't scan? Enter this key: <code class="secret">{{ e.secret }}</code></p>
+              <form class="grid" (ngSubmit)="confirmMfa()">
+                <div class="field">
+                  <label for="mfa2">Code from the app</label>
+                  <input id="mfa2" name="mfa2" inputmode="numeric" autocomplete="one-time-code" maxlength="8" [(ngModel)]="mfaCode" />
+                </div>
+                <div class="row">
+                  <button class="btn primary" type="submit" [disabled]="busy() || mfaCode.length < 6">Turn on</button>
+                  <button class="btn ghost" type="button" (click)="enrolling.set(null)">Cancel</button>
+                </div>
+              </form>
+            } @else {
+              <p class="small">Protect your account with a code from an authenticator app, as well as your password.</p>
+              <button class="btn" type="button" (click)="startMfa()" [disabled]="busy()">Set up two-step sign-in</button>
+            }
           }
 
           <h2>Sync</h2>
@@ -304,6 +357,44 @@ import { Avatar } from '../shared/avatar';
         border-radius: 50%;
       }
     }
+    .meter {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px 8px;
+      font-size: 0.9rem;
+      .bars {
+        display: inline-flex;
+        gap: 3px;
+        i {
+          width: 22px;
+          height: 6px;
+          border-radius: 3px;
+          background: var(--line);
+        }
+      }
+      &[data-score='1'] .bars i:nth-child(-n + 1),
+      &[data-score='2'] .bars i:nth-child(-n + 2) {
+        background: var(--warn);
+      }
+      &[data-score='3'] .bars i:nth-child(-n + 3),
+      &[data-score='4'] .bars i {
+        background: var(--ok);
+      }
+      &[data-score='0'] strong,
+      &[data-score='1'] strong {
+        color: var(--red);
+      }
+    }
+    .qr {
+      background: #fff;
+      padding: 8px;
+      border-radius: var(--r-sm);
+    }
+    .secret {
+      word-break: break-all;
+      font-size: 0.85rem;
+    }
     .status {
       font-weight: 700;
       margin-bottom: 4px;
@@ -326,7 +417,6 @@ export class Account {
   protected code = '';
   protected displayName = '';
   protected username = '';
-  protected newPassword = '';
   protected newPassword2 = '';
   protected readonly step = signal<'email' | 'code'>('email');
   protected readonly busy = signal(false);
@@ -335,6 +425,20 @@ export class Account {
   protected readonly confirmDelete = signal(false);
   protected readonly unsynced = computed(() => this.store.history().filter((r) => !r.synced).length);
   protected readonly needsSetup = computed(() => this.cloud.signedIn() && !this.cloud.profile().username);
+  protected readonly minLength = MIN_LENGTH;
+  private readonly pw = signal('');
+  protected get newPassword() {
+    return this.pw();
+  }
+  protected set newPassword(v: string) {
+    this.pw.set(v);
+  }
+  protected readonly strength = computed(() =>
+    passwordStrength(this.pw(), [this.cloud.user()?.email ?? '', this.cloud.profile().username ?? '', this.cloud.profile().displayName ?? '']),
+  );
+  protected mfaCode = '';
+  protected readonly factors = signal<{ id: string; name: string; createdAt: string }[] | null>(null);
+  protected readonly enrolling = signal<{ factorId: string; qr: string; secret: string } | null>(null);
 
   constructor() {
     // Fill the profile form when the profile loads.
@@ -342,6 +446,51 @@ export class Account {
       const p = this.cloud.profile();
       this.displayName = p.displayName ?? '';
       this.username = p.username ?? '';
+    });
+    effect(() => {
+      if (this.cloud.signedIn()) this.loadFactors();
+    });
+  }
+
+  private loadFactors() {
+    this.cloud
+      .mfaFactors()
+      .then((f) => this.factors.set(f))
+      .catch(() => this.factors.set(null));
+  }
+
+  protected verifyMfa() {
+    return this.run(async () => {
+      await this.cloud.verifyMfa(this.mfaCode);
+      this.mfaCode = '';
+    });
+  }
+
+  protected startMfa() {
+    return this.run(async () => {
+      this.mfaCode = '';
+      this.enrolling.set(await this.cloud.enrollMfa());
+    });
+  }
+
+  protected confirmMfa() {
+    const e = this.enrolling();
+    if (!e) return;
+    return this.run(async () => {
+      await this.cloud.verifyMfa(this.mfaCode, e.factorId);
+      this.mfaCode = '';
+      this.enrolling.set(null);
+      this.loadFactors();
+      return 'Two-step sign-in is on. Keep your authenticator app safe: you need it to sign in.';
+    });
+  }
+
+  protected removeMfa(id: string) {
+    if (!confirm('Turn off two-step sign-in?')) return;
+    return this.run(async () => {
+      await this.cloud.removeMfa(id);
+      this.loadFactors();
+      return 'Two-step sign-in is off.';
     });
   }
 
@@ -395,10 +544,11 @@ export class Account {
 
   protected savePassword() {
     return this.run(async () => {
-      if (this.newPassword.length < 8) throw new Error('Use at least 8 characters.');
+      if (!this.strength().ok) throw new Error(this.strength().hint ?? 'Choose a stronger password.');
       if (this.newPassword !== this.newPassword2) throw new Error("The two passwords don't match.");
       await this.cloud.setPassword(this.newPassword);
-      this.newPassword = this.newPassword2 = '';
+      this.newPassword = '';
+      this.newPassword2 = '';
       return 'Password set. You can now sign in with your email or username and this password.';
     });
   }

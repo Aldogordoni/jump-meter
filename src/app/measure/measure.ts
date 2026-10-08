@@ -1021,6 +1021,7 @@ export class Measure implements OnDestroy {
         caption: `${value} ${u} ${this.type()}`,
         subcaption: `${extra}${date}`,
         onProgress: (f) => this.clipProgress.set(Math.round(f * 100)),
+        quality: this.store.settings().clipQuality,
       });
       await clipStore.put({ id, ...clip, createdAt: new Date().toISOString() });
       this.cloud.schedule(0);

@@ -1,5 +1,8 @@
 import { Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
-import type { SupabaseClient, User } from '@supabase/supabase-js';
+import type { RealtimeChannel, SupabaseClient as BaseClient, User } from '@supabase/supabase-js';
+import type { Database, Json } from './database.types';
+
+type SupabaseClient = BaseClient<Database>;
 import { SUPABASE_ANON_KEY, SUPABASE_URL, cloudConfigured } from './cloud.config';
 import { StoreService, Settings, isUuid, uuid } from './store.service';
 import { JumpRecord, JumpType } from './jump-math';
@@ -62,7 +65,10 @@ export class CloudService {
   readonly configured = cloudConfigured();
   readonly user = signal<{ id: string; email: string } | null>(null);
   /** Whitelist state for the signed-in user. */
-  readonly access = signal<'unknown' | 'allowed' | 'revoked'>('unknown');
+  readonly access = signal<'unknown' | 'allowed' | 'revoked' | 'mfa'>('unknown');
+  /** Someone else commented on a jump you can see (from realtime). */
+  readonly commentPing = signal<{ jumpId: string; at: number } | null>(null);
+  private channel?: RealtimeChannel;
   readonly isAdmin = signal(false);
   readonly status = signal<SyncStatus>('off');
   readonly error = signal<string | null>(null);
@@ -149,7 +155,7 @@ export class CloudService {
 
   private sb(): Promise<SupabaseClient> {
     this.client ??= import('@supabase/supabase-js').then(({ createClient }) =>
-      createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      createClient<Database>(SUPABASE_URL, SUPABASE_ANON_KEY, {
         auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false, storageKey: 'jump-meter.auth' },
       }),
     );
@@ -284,6 +290,13 @@ export class CloudService {
     this.profile.update((p) => ({ ...p, avatarUrl: readLocal(avatarKey(user.id)) }));
     this.error.set(null);
     const sb = await this.sb();
+    // Two-step sign-in turned on: nothing is readable until the code is entered.
+    const aal = await sb.auth.mfa.getAuthenticatorAssuranceLevel().catch(() => null);
+    if (aal?.data && aal.data.nextLevel === 'aal2' && aal.data.currentLevel !== 'aal2') {
+      this.access.set('mfa');
+      this.status.set('off');
+      return;
+    }
     const [allowed, admin] = await Promise.all([sb.rpc('is_allowed'), sb.rpc('is_admin')]);
     if (allowed.error) {
       this.status.set(isNetworkError(allowed.error) ? 'offline' : 'error');
@@ -292,11 +305,86 @@ export class CloudService {
     }
     this.access.set(allowed.data ? 'allowed' : 'revoked');
     this.isAdmin.set(!!admin.data);
-    if (allowed.data) await this.syncNow();
-    else this.status.set('off');
+    if (allowed.data) {
+      this.startRealtime(sb, user.id);
+      await this.syncNow();
+    } else this.status.set('off');
+  }
+
+  /** Live updates: jumps changed on another device, and new comments. */
+  private startRealtime(sb: SupabaseClient, uid: string) {
+    this.channel?.unsubscribe();
+    try {
+      this.channel = sb
+        .channel(`me-${uid}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'jumps', filter: `user_id=eq.${uid}` }, () =>
+          this.schedule(1500),
+        )
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'jump_comments' }, (p) => {
+          const row = p.new as { jump_id?: string; author_id?: string };
+          if (row.jump_id && row.author_id !== uid) this.commentPing.set({ jumpId: row.jump_id, at: Date.now() });
+        })
+        .subscribe();
+    } catch (e) {
+      console.warn('[jump-meter] realtime unavailable', e);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Two-step sign-in (authenticator app)
+  // ---------------------------------------------------------------------------
+
+  async mfaFactors(): Promise<{ id: string; name: string; createdAt: string }[]> {
+    const sb = await this.sb();
+    const { data, error } = await sb.auth.mfa.listFactors();
+    if (error) throw new Error(friendlyAuthError(error.message));
+    return (data?.totp ?? [])
+      .filter((f) => f.status === 'verified')
+      .map((f) => ({ id: f.id, name: f.friendly_name ?? 'Authenticator app', createdAt: f.created_at }));
+  }
+
+  /** Start adding an authenticator app: returns the QR code to scan. */
+  async enrollMfa(): Promise<{ factorId: string; qr: string; secret: string }> {
+    const sb = await this.sb();
+    // Clear any half-finished setup first.
+    const list = await sb.auth.mfa.listFactors();
+    for (const f of list.data?.all ?? []) {
+      if (f.status !== 'verified') await sb.auth.mfa.unenroll({ factorId: f.id }).catch(() => undefined);
+    }
+    const { data, error } = await sb.auth.mfa.enroll({
+      factorType: 'totp',
+      friendlyName: `Jump Meter ${new Date().toISOString().slice(0, 16)}`,
+      issuer: 'Jump Meter',
+    });
+    if (error) throw new Error(friendlyAuthError(error.message));
+    return { factorId: data.id, qr: data.totp.qr_code, secret: data.totp.secret };
+  }
+
+  /** Finish adding (or sign in with) an authenticator code. */
+  async verifyMfa(code: string, factorId?: string) {
+    const sb = await this.sb();
+    let id = factorId;
+    if (!id) {
+      const { data } = await sb.auth.mfa.listFactors();
+      id = data?.totp.find((f) => f.status === 'verified')?.id;
+    }
+    if (!id) throw new Error('No authenticator app is set up for this account.');
+    const { error } = await sb.auth.mfa.challengeAndVerify({ factorId: id, code: code.replace(/\s+/g, '') });
+    if (error) throw new Error(/invalid|expired/i.test(error.message) ? "That code didn't work. Codes change every 30 seconds; try the current one." : friendlyAuthError(error.message));
+    const { data } = await sb.auth.getUser();
+    if (data.user) await this.onSignedIn(data.user);
+  }
+
+  async removeMfa(factorId: string) {
+    const sb = await this.sb();
+    const { error } = await sb.auth.mfa.unenroll({ factorId });
+    if (error) throw new Error(friendlyAuthError(error.message));
+    await sb.auth.refreshSession().catch(() => undefined);
   }
 
   private onSignedOut() {
+    this.channel?.unsubscribe();
+    this.channel = undefined;
     this.user.set(null);
     this.profile.set({ username: null, displayName: null, avatarUrl: null });
     this.access.set('unknown');
@@ -391,10 +479,11 @@ export class CloudService {
         .order('jumped_at')
         .range(from, from + 999);
       if (error) throw error;
-      data.forEach((r: JumpRow) => remote.set(r.id, r));
+      (data as unknown as JumpRow[]).forEach((r) => remote.set(r.id, r));
       if (data.length < 1000) break;
     }
 
+    const remoteCount = remote.size;
     const toUpload: JumpRecord[] = [];
     const toRemove: string[] = [];
     const toUpsert: JumpRecord[] = [];
@@ -408,8 +497,12 @@ export class CloudService {
       } else if (row) {
         toUpsert.push({ ...fromRow(row), synced: true });
         remote.delete(local.id);
+      } else if (local.synced && remoteCount > 0) {
+        // Deleted on another device. (An empty answer is never taken as "delete everything":
+        // that's more likely a permissions hiccup than a deliberate wipe.)
+        toRemove.push(local.id);
       } else if (local.synced) {
-        toRemove.push(local.id); // deleted on another device
+        continue;
       } else {
         toUpload.push(local);
       }
@@ -489,7 +582,7 @@ export class CloudService {
     const sb = await this.sb();
     const { error } = await sb
       .from('profiles')
-      .upsert({ user_id: u.id, settings, updated_at: new Date().toISOString() });
+      .upsert({ user_id: u.id, settings: settings as unknown as Json, updated_at: new Date().toISOString() });
     if (error) console.warn('[jump-meter] settings sync failed', error);
   }
 
@@ -522,6 +615,27 @@ export class CloudService {
     };
     await clipStore.put(clip).catch(() => undefined);
     return clip;
+  }
+
+  /** Remove clips (not the jumps) from the cloud. */
+  async removeClips(ids: string[]) {
+    const u = this.user();
+    if (!u || !ids.length || !this.signedIn()) return;
+    const sb = await this.sb();
+    const { error } = await sb.storage
+      .from(BUCKET)
+      .remove(ids.flatMap((id) => [`${u.id}/${id}.mp4`, `${u.id}/${id}.webm`, `${u.id}/${id}.jpg`]));
+    if (error) throw error;
+    const up = await sb.from('jumps').update({ has_clip: false, updated_at: new Date().toISOString() }).in('id', ids);
+    if (up.error) throw up.error;
+  }
+
+  /** Bytes of clips and pictures this account keeps in the cloud. */
+  async storageBytes(): Promise<number | null> {
+    if (!this.signedIn()) return null;
+    const sb = await this.sb();
+    const { data, error } = await sb.rpc('my_storage_bytes');
+    return error ? null : Number(data);
   }
 
   /** Short-lived links to clip thumbnails stored in the cloud. */
@@ -565,7 +679,8 @@ export class CloudService {
     const p = await sb.from('profiles').delete().eq('user_id', u.id);
     if (p.error) throw p.error;
     // …then the login itself, if the optional delete_my_account() function is installed.
-    const { error } = await sb.rpc('delete_my_account');
+    // Optional function (migration 0002), so it isn't in the generated types.
+    const { error } = await (sb as unknown as BaseClient).rpc('delete_my_account');
     if (error) console.warn('[jump-meter] account record kept (delete_my_account not installed)', error.message);
     await sb.auth.signOut().catch(() => undefined);
     this.onSignedOut();
@@ -613,7 +728,7 @@ export class CloudService {
 
 // -----------------------------------------------------------------------------
 
-function toRow(r: JumpRecord): Omit<JumpRow, 'has_clip'> & { updated_at: string } {
+function toRow(r: JumpRecord): Database['public']['Tables']['jumps']['Insert'] {
   return {
     id: r.id,
     jumped_at: r.date,
@@ -631,7 +746,7 @@ function toRow(r: JumpRecord): Omit<JumpRow, 'has_clip'> & { updated_at: string 
     rsi_mod: r.rsiMod ?? null,
     session_id: r.sessionId ?? null,
     tags: r.tags ?? [],
-    extra: Object.fromEntries(EXTRA_KEYS.filter((k) => r[k] !== undefined).map((k) => [k, r[k]])),
+    extra: Object.fromEntries(EXTRA_KEYS.filter((k) => r[k] !== undefined).map((k) => [k, r[k]])) as Json,
     updated_at: new Date().toISOString(),
   };
 }

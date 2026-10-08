@@ -33,7 +33,8 @@ create table storage.objects (
   id uuid primary key default gen_random_uuid(),
   bucket_id text references storage.buckets (id),
   name text not null,
-  owner uuid
+  owner uuid,
+  metadata jsonb
 );
 alter table storage.objects enable row level security;
 grant select, insert, update, delete on storage.objects to authenticated;
@@ -47,3 +48,16 @@ grant execute on function storage.foldername(text) to anon, authenticated;
 alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
 alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
 alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
+
+-- Two-factor factors (subset of Supabase's auth.mfa_factors).
+create table auth.mfa_factors (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id),
+  factor_type text not null default 'totp',
+  status text not null default 'unverified'
+);
+
+-- Realtime publication.
+set client_min_messages = error;
+create publication supabase_realtime;
+reset client_min_messages;

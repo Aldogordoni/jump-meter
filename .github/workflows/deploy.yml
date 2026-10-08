@@ -1,8 +1,9 @@
-name: Deploy to GitHub Pages
+name: Test and deploy
 
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -11,11 +12,73 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Unit tests (maths, detection, insights)
+        run: npm run test:unit
+
+      - name: Database security rules
+        run: npm run test:rls
+
+      - name: Download pose model
+        run: |
+          mkdir -p public/models
+          curl -fsSL -o public/models/pose_landmarker_full.task \
+            https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task
+
+      - name: Build
+        run: npx ng build --base-href /jump-meter/
+
+      - name: Install browser
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end tests
+        env:
+          BASE_URL: http://localhost:8765/jump-meter/
+        run: |
+          mkdir -p /tmp/srv && cp -r dist/jump-meter/browser /tmp/srv/jump-meter
+          (cd /tmp/srv && python3 -m http.server 8765 >/dev/null 2>&1 &)
+          sleep 1
+          node e2e/run.mjs
+
+      - name: Keep screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: e2e/out
+
   build:
+    needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +97,9 @@ jobs:
           curl -fsSL -o public/models/pose_landmarker_full.task \
             https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task
 
+      - name: Stamp version
+        run: sed -i "s/APP_VERSION = 'dev'/APP_VERSION = '${GITHUB_SHA::7}'/" src/app/core/version.ts
+
       - name: Build
         run: npx ng build --base-href /${{ github.event.repository.name }}/
 
@@ -43,6 +109,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

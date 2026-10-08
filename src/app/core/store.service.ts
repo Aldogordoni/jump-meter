@@ -26,6 +26,10 @@ export interface Settings {
   haptics: boolean;
   /** First-run guide has been seen. */
   onboarded: boolean;
+  /** Size of saved clips. */
+  clipQuality: 'high' | 'standard';
+  /** Delete clips of jumps older than this many months (null = keep forever). */
+  clipRetentionMonths: number | null;
 }
 
 export interface Goal {
@@ -55,6 +59,8 @@ const DEFAULT_SETTINGS: Settings = {
   customTags: [],
   haptics: true,
   onboarded: false,
+  clipQuality: 'high',
+  clipRetentionMonths: null,
 };
 
 function load<T>(key: string, fallback: T): T {

@@ -21,15 +21,23 @@ export interface ClipOptions {
   caption: string;
   subcaption: string;
   onProgress?: (fraction: number) => void;
+  quality?: ClipQuality;
 }
 
 const OUT_FPS = 30;
 const MAX_SIDE = 1080;
+/** Clip size: high is 1080p at 8 Mbps; standard is 720p at 3.5 Mbps (about a third of the size). */
+export type ClipQuality = 'high' | 'standard';
+const QUALITY: Record<ClipQuality, { side: number; bitrate: number }> = {
+  high: { side: 1080, bitrate: 8_000_000 },
+  standard: { side: 720, bitrate: 3_500_000 },
+};
 const HOLD_FRAMES = 18; // 0.6 s pause on each key frame
 const MAX_SOURCE_FRAMES = 420;
 
 export async function makeClip(opts: ClipOptions): Promise<{ video: Blob; poster: Blob; mime: string }> {
   const { source, realFps, marks } = opts;
+  const q = QUALITY[opts.quality ?? 'high'];
   const sorted = [...marks].sort((a, b) => a.frame - b.frame);
   const pad = Math.round(realFps * 0.3);
   const first = Math.max(0, sorted[0].frame - pad);
@@ -41,19 +49,19 @@ export async function makeClip(opts: ClipOptions): Promise<{ video: Blob; poster
   frames.sort((a, b) => a - b);
 
   const canvas = document.createElement('canvas');
-  const scale = Math.min(1, MAX_SIDE / Math.max(source.width, source.height));
+  const scale = Math.min(1, q.side / Math.max(source.width, source.height));
   // Encoders want even dimensions.
   canvas.width = Math.max(2, Math.round((source.width * scale) / 2) * 2);
   canvas.height = Math.max(2, Math.round((source.height * scale) / 2) * 2);
   const ctx = canvas.getContext('2d')!;
 
-  const encoder = await createEncoder(canvas);
+  const encoder = await createEncoder(canvas, q.bitrate);
   let poster: Blob | null = null;
   let activeLabel = '';
   let outIndex = 0;
   const total = frames.length + sorted.length * HOLD_FRAMES;
 
-  await source.scan(frames, MAX_SIDE, async (i, img) => {
+  await source.scan(frames, q.side, async (i, img) => {
     const mark = sorted.find((m) => m.frame === i);
     if (mark) activeLabel = mark.label;
     drawFrame(ctx, img, canvas, activeLabel, opts.caption, opts.subcaption, !!mark);
@@ -95,7 +103,7 @@ export async function trimClip(
     canvas.width = Math.max(2, Math.round((source.width * scale) / 2) * 2);
     canvas.height = Math.max(2, Math.round((source.height * scale) / 2) * 2);
     const ctx = canvas.getContext('2d')!;
-    const encoder = await createEncoder(canvas);
+    const encoder = await createEncoder(canvas, 8_000_000);
     let poster: Blob | null = null;
     let n = 0;
     await source.scan(frames, MAX_SIDE, async (_i, img) => {
@@ -171,7 +179,7 @@ interface Encoder {
   finish(): Promise<Blob>;
 }
 
-async function createEncoder(canvas: HTMLCanvasElement): Promise<Encoder> {
+async function createEncoder(canvas: HTMLCanvasElement, bitrate: number): Promise<Encoder> {
   if (typeof VideoEncoder !== 'undefined') {
     // H.264 plays everywhere (Photos, WhatsApp…); VP9 is a fast fallback for browsers without an H.264 encoder.
     const options: [string, 'avc' | 'vp9'][] = [
@@ -185,7 +193,7 @@ async function createEncoder(canvas: HTMLCanvasElement): Promise<Encoder> {
         codec,
         width: canvas.width,
         height: canvas.height,
-        bitrate: 8_000_000,
+        bitrate,
         framerate: OUT_FPS,
         ...(kind === 'avc' ? { avc: { format: 'avc' as const } } : {}),
       };
@@ -196,7 +204,7 @@ async function createEncoder(canvas: HTMLCanvasElement): Promise<Encoder> {
       }
     }
   }
-  return mediaRecorderEncoder(canvas);
+  return mediaRecorderEncoder(canvas, bitrate);
 }
 
 function webCodecsEncoder(canvas: HTMLCanvasElement, config: VideoEncoderConfig, kind: 'avc' | 'vp9'): Encoder {
@@ -231,7 +239,7 @@ function webCodecsEncoder(canvas: HTMLCanvasElement, config: VideoEncoderConfig,
 }
 
 /** Fallback: record the canvas in real time while we paint frames at 30 fps. */
-function mediaRecorderEncoder(canvas: HTMLCanvasElement): Encoder {
+function mediaRecorderEncoder(canvas: HTMLCanvasElement, bitrate: number): Encoder {
   if (typeof MediaRecorder === 'undefined' || !canvas.captureStream) {
     throw new Error('This browser cannot create video files.');
   }
@@ -240,7 +248,7 @@ function mediaRecorderEncoder(canvas: HTMLCanvasElement): Encoder {
   );
   const stream = canvas.captureStream(0);
   const track = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
-  const rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000 } : undefined);
+  const rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: bitrate } : undefined);
   const chunks: Blob[] = [];
   rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   rec.start();
